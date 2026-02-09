@@ -1375,4 +1375,2307 @@ This is real machine learning work. Not deep learning with neural networks, but 
 
 ---
 
-(Continuing in next message due to length...)
+## FILE 7: `backend/app/api/__init__.py`
+
+### When to Code This
+After recommender, schemas, and service are all working
+
+### Time Estimate
+90-120 minutes
+
+### What This File Does
+
+This is your API layer - the FastAPI route handlers that connect HTTP requests to your business logic. It receives requests from the frontend, validates inputs, calls the service and recommender, transforms data into schemas, handles errors, and returns responses.
+
+Think of it as the waiter in a restaurant: takes orders (requests), talks to the kitchen (service/recommender), brings food (responses).
+
+### The APIRouter
+
+You'll create an APIRouter object (not the full FastAPI app - that's in main.py). The router groups related endpoints together.
+
+**Why a router:**
+- Separation of concerns (routes in one place)
+- Can add prefix to all routes (like "/api/v1")
+- Can be included in multiple apps (reusability)
+
+### The Four Routes You'll Build
+
+#### Route 1: POST /search
+
+**Purpose:** Search for movies by title
+
+**Request body:** Should expect a JSON object with:
+- query (string, required, minimum length 1)
+- page (optional integer, default 1)
+
+**Process:**
+1. Define a Pydantic model for the request body right in this file (or at the top with the other imports). This model validates incoming JSON.
+2. Use that model as the parameter type in the route function.
+3. Call tmdb_service.search_movies with the query and page.
+4. The raw response is a dict with results, page, total_pages, total_results.
+5. Transform the results list: Loop through each raw movie dict and create a MovieSummary schema from it. You'll need to extract the right fields.
+6. Create a SearchResponse schema with the transformed results and the pagination metadata.
+7. Return that SearchResponse. FastAPI auto-serializes it to JSON.
+
+**HTTP method why POST:**
+Even though this is a read operation, you're sending a JSON body. POST is clearer than GET with body (which is discouraged).
+
+**Error handling:**
+Wrap the service call in try/except. Catch HTTPStatusError from httpx. If caught, check the status code:
+- 404: Raise HTTPException with 404 status and message "No results found"
+- 429: Raise HTTPException with 429 status and message "Too many requests, please try again later"
+- Other: Raise HTTPException with 500 status and generic message
+
+**Why transform to schemas:**
+Raw TMDB JSON has 50+ fields. Your frontend only needs the fields in MovieSummary. Sending less data = faster response = better mobile experience.
+
+#### Route 2: GET /movie/{movie_id}
+
+**Purpose:** Get full details for a specific movie
+
+**Path parameter:**
+- movie_id (integer) - Part of the URL path
+
+**Process:**
+1. Define route with path parameter syntax.
+2. Call tmdb_service.get_movie_details with the movie_id.
+3. The raw response is a complex nested dict with movie info, credits object (with cast and crew lists), and keywords object (with keywords list).
+4. Transform to MovieDetail schema:
+   - Extract basic fields (id, title, overview, etc.) directly.
+   - Transform genres list: Loop through genres, create Genre schema for each.
+   - Transform cast list: Take first 10 from credits.cast, create CastMember schema for each.
+   - Transform crew list: Filter credits.crew to only Directors, Writers, Producers. Create CrewMember schema for each.
+   - Transform keywords: Extract from keywords.keywords (yes, nested), get just the name strings into a list.
+5. Return the MovieDetail schema.
+
+**HTTP method why GET:**
+True read operation, no body needed, ID in URL is RESTful.
+
+**Error handling:**
+Same try/except pattern. Additionally catch 404 specifically - movie ID doesn't exist. Return "Movie not found".
+
+**Why limit cast to 10:**
+Most users recognize lead actors. Showing 50 cast members clutters the UI and increases response size.
+
+**Why filter crew:**
+TMDB has hundreds of crew roles (Best Boy, Gaffer, Key Grip, etc.). Most users only care about Director, Writer, Producer. Filtering makes data actionable.
+
+#### Route 3: POST /recommendations
+
+**Purpose:** Get content-based recommendations for a movie
+
+**Request body:** JSON object with:
+- movie_id (integer, required)
+- top_k (optional integer, default 10, maximum 50)
+
+**Validation:**
+Use Field with gt=0 (greater than zero) and le=50 (less than or equal 50) for top_k. Prevents abuse.
+
+**Process:**
+
+**Step 1: Fetch target movie**
+Call tmdb_service.get_movie_details with movie_id. This is the movie the user is viewing.
+
+**Step 2: Build candidate pool**
+Call tmdb_service.get_similar_movies with movie_id. This gives you TMDB's similar movies (page 1, which is 20 movies).
+
+Extract genre IDs from the target movie. Call tmdb_service.discover_by_genres with those genre IDs. This gives you popular movies in same genres.
+
+Combine both lists. Deduplicate based on movie ID (use a dict with ID as key, then extract values).
+
+**Step 3: Run recommender**
+Call recommender.recommend with target movie, candidates, and top_k.
+
+This returns a list of tuples: (movie_dict, score).
+
+**Step 4: Transform to response schema**
+Loop through each result tuple:
+- Extract the movie dict and score
+- Create a MovieSummary schema from the movie dict
+- Create a RecommendationItem schema with the MovieSummary, score, and a reason string
+- For the reason, you can generate it from the features: check which genres overlap, mention them. Or just say "Based on similar genres and themes" for simplicity.
+
+Put all RecommendationItem objects in a list.
+
+Create a RecommendationResponse schema with that list.
+
+Return it.
+
+**Error handling:**
+If movie_id doesn't exist, tmdb_service.get_movie_details will throw 404. Catch it and return "Movie not found".
+
+If no candidates are found (rare), return an empty recommendations list rather than erroring.
+
+**Why this candidate strategy:**
+TMDB's similar movies are decent but limited to 20. Adding genre discovery expands the pool to 40+ movies, giving the recommender more options. Better recommendations result.
+
+**Why deduplicate:**
+Same movie might appear in both similar and genre discovery results. Deduplicating prevents the recommender from scoring the same movie twice.
+
+#### Route 4: GET /health
+
+**Purpose:** Health check endpoint for monitoring
+
+**Process:**
+Just return a JSON object with "status": "healthy".
+
+**Why this endpoint:**
+When deploying to production, monitoring systems ping this endpoint to check if the service is up. If it doesn't respond or returns an error, alerts fire.
+
+It's also useful during development - a quick way to test if your server is running.
+
+**HTTP method:**
+GET - simple, no parameters.
+
+### Request/Response Models
+
+At the top of your file (after imports, before routes), define the Pydantic models for request bodies:
+
+**SearchRequest:**
+- query: str with Field(min_length=1)
+- page: int with default 1
+
+**RecommendationRequest:**
+- movie_id: int
+- top_k: int with default 10, Field(gt=0, le=50)
+
+**Why separate request models:**
+Clear contract for what the endpoint expects. Auto-generates API docs showing required fields.
+
+### Dependency Injection
+
+FastAPI supports dependency injection - pass the settings object as a parameter with Depends(). This makes testing easier (you can inject mocks).
+
+For now, you can directly import settings, tmdb_service, and recommender. As you advance, refactor to use Depends().
+
+### Response Models
+
+Use the response_model parameter in route decorators. This tells FastAPI:
+- Validate the response (catches bugs where you return wrong data)
+- Auto-generate docs showing response structure
+- Serialize Pydantic models to JSON
+
+### Status Codes
+
+Specify status codes explicitly:
+- 200 for successful GET
+- 201 for successful POST creating something (not applicable here)
+- 404 for not found
+- 429 for rate limit exceeded
+- 500 for server errors
+
+Use FastAPI's status module for constants like status.HTTP_200_OK.
+
+### CORS Headers
+
+CORS will be handled in main.py middleware, not in routes. Routes don't need to think about CORS.
+
+### Testing Your API
+
+After writing all routes, test them:
+
+**Start your server:**
+Run uvicorn with your main:app.
+
+**Use Swagger docs:**
+Navigate to http://localhost:8000/docs (FastAPI auto-generates this). You'll see all your endpoints with "Try it out" buttons. Test each one.
+
+**Test search:**
+Search for "Inception". Should return results with pagination.
+
+**Test movie details:**
+Get details for movie ID 27205 (Inception's ID). Should return full details with cast, crew, genres, keywords.
+
+**Test recommendations:**
+Get recommendations for 27205. Should return 10 similar movies with scores.
+
+**Test health:**
+Should return status healthy.
+
+### What You're Learning
+
+- **REST API design:** HTTP methods, status codes, resource-based URLs
+- **FastAPI framework:** Route decorators, dependency injection, auto docs
+- **Error handling:** Try/except, translating exceptions to HTTP errors
+- **Data transformation:** Raw data to schemas, business logic
+- **API documentation:** Self-documenting code with Pydantic
+
+### Common Mistakes
+
+❌ Returning raw dicts instead of schema objects (no validation)
+❌ Not handling TMDB errors (crashes on API failures)
+❌ Forgetting to deduplicate candidates (same movie scored twice)
+❌ Not limiting top_k parameter (users request 10000 recommendations)
+❌ Using sync code instead of async (blocks the event loop)
+
+---
+
+## FILE 8: `backend/main.py`
+
+### When to Code This
+After all other backend files are complete
+
+### Time Estimate
+30-45 minutes
+
+### What This File Does
+
+This is the entry point - where your FastAPI application is created, configured, and launched. It's the main coordinator that brings everything together.
+
+### The FastAPI App Instance
+
+Create a FastAPI instance with specific parameters:
+
+**Title parameter:**
+Set to "CineMatch API" - appears in docs.
+
+**Description parameter:**
+Brief description like "Movie recommendation API using content-based filtering".
+
+**Version parameter:**
+Start with "1.0.0" - follows semantic versioning.
+
+**Why these matter:**
+They populate the automatic API documentation at /docs. Professional touch for a portfolio project.
+
+### CORS Middleware
+
+Add CORS middleware to your app. This allows your React Native frontend to call your API from different origins.
+
+**Import:**
+You'll need CORSMiddleware from fastapi.middleware.cors.
+
+**Parameters:**
+- allow_origins: List of origins that can call your API. In development, use ["*"] (allow all). In production, specify your frontend's exact URL.
+- allow_credentials: Set to True.
+- allow_methods: Use ["*"] (allow all HTTP methods).
+- allow_headers: Use ["*"] (allow all headers).
+
+**Why CORS is needed:**
+Browsers block cross-origin requests by default for security. Your frontend (on localhost:19006 or a phone) making requests to your backend (on localhost:8000) is cross-origin. CORS middleware adds headers that tell the browser it's allowed.
+
+**Development vs production:**
+In dev, ["*"] is convenient. In production, specify exact domains: ["https://yourdomain.com"]. Wildcard in production is a security risk.
+
+### Including the API Router
+
+Import your router from app.api. Include it in the app with a prefix.
+
+Use app.include_router, pass the router object, set prefix to "/api", set tags to ["movies"] (for docs organization).
+
+**Why prefix:**
+All routes become /api/search, /api/movie/{id}, etc. This is a versioning strategy - later you could add /api/v2 with breaking changes while keeping /api or /api/v1 stable.
+
+**Tags:**
+Organize endpoints in the Swagger docs. All movie-related endpoints appear under "movies" section.
+
+### Startup Event
+
+Define a startup event handler function. This runs once when the server starts.
+
+**What to do in startup:**
+- Print a message: "Starting CineMatch API..."
+- Optionally, validate that settings are loaded correctly (check if TMDB API key exists)
+
+**Why startup events:**
+Initialize resources that need to be ready before handling requests. Could pre-load data, establish database connections (if you had a database), warm up caches, etc.
+
+### Shutdown Event
+
+Define a shutdown event handler function. This runs when the server stops.
+
+**What to do in shutdown:**
+- Print a message: "Shutting down CineMatch API..."
+- Call tmdb_service.close() to close the HTTP client
+
+**Why shutdown events:**
+Clean up resources. Close connections, save state, flush caches. Prevents resource leaks.
+
+### Root Endpoint
+
+Define a GET route at "/" (root).
+
+Return a simple JSON object with:
+- message: "Welcome to CineMatch API"
+- docs: "/docs"
+- health: "/api/health"
+
+**Why:**
+Provides entry point information. If someone visits your API URL, they know where to find docs and health check.
+
+### Running the Server
+
+At the bottom of the file, add the standard Python main block:
+
+if __name__ equals "__main__":
+    Import uvicorn
+    Run uvicorn with "main:app", host from settings, port from settings, reload=True
+
+**Parameters explained:**
+
+"main:app" - Tells uvicorn to import main module and look for app variable.
+
+host from settings - Allows binding to specific interface. "0.0.0.0" makes it accessible from other devices on your network (useful for testing on phone). "127.0.0.1" only allows local access.
+
+port from settings - Typically 8000. Configurable via environment variable.
+
+reload=True - Auto-restart server when code changes. Only use in development! In production, set to False.
+
+### Testing Your Complete Backend
+
+This is the moment of truth:
+
+**Step 1: Start the server**
+Run the file directly with Python. Or use uvicorn command: uvicorn main:app --reload.
+
+**Step 2: Check the logs**
+Should see "Starting CineMatch API..." message, followed by uvicorn logs showing server is running on your host:port.
+
+**Step 3: Visit the docs**
+Open browser, go to http://localhost:8000/docs. You should see Swagger UI with all your endpoints documented.
+
+**Step 4: Test root endpoint**
+Go to http://localhost:8000/ - should see the welcome message.
+
+**Step 5: Test health**
+Use the docs or curl to hit /api/health - should return healthy status.
+
+**Step 6: Test full flow**
+Search for a movie, get its details, get recommendations. Trace the flow: FastAPI receives request → routes to API handler → handler calls service → service calls TMDB → data returns → schema transformation → response sent.
+
+**Step 7: Stop the server**
+Ctrl+C in terminal. Should see "Shutting down CineMatch API..." message.
+
+### What You're Learning
+
+- **Application structure:** How web frameworks organize code
+- **Middleware:** Cross-cutting concerns like CORS
+- **Lifecycle events:** Startup and shutdown hooks
+- **Server deployment:** Running ASGI servers with uvicorn
+- **API documentation:** Auto-generated docs with Swagger
+
+### Common Mistakes
+
+❌ Forgetting to include the router (routes don't work)
+❌ Not adding CORS middleware (frontend gets CORS errors)
+❌ Using wrong host (can't access from phone)
+❌ Setting reload=True in production (slow, resets state)
+❌ Not closing HTTP client on shutdown (resource leak)
+
+---
+
+## FRONTEND DEVELOPMENT
+
+Now we move to the React Native frontend. The backend is complete and testable. The frontend will consume your API.
+
+---
+
+## FILE 9: `frontend/package.json`
+
+### When to Code This
+First frontend file to create/edit
+
+### Time Estimate
+15-20 minutes
+
+### What This File Does
+
+This is your Node.js project manifest. It defines:
+- Project metadata (name, version)
+- Dependencies (libraries you need)
+- Scripts (commands you'll run)
+
+### The Dependencies Section
+
+List all libraries your app needs:
+
+**Core dependencies:**
+- expo - The Expo framework itself (SDK version ~50.0.0 or latest)
+- react - React library (version compatible with Expo, usually ~18.2.0)
+- react-native - React Native core (version comes from Expo)
+- expo-status-bar - Handles status bar styling
+
+**Navigation:**
+- @react-navigation/native - Core navigation library
+- @react-navigation/native-stack - Stack navigator for screen transitions
+- react-native-screens - Native screen management (required by navigation)
+- react-native-safe-area-context - Handle device notches/safe areas (required by navigation)
+
+**HTTP client:**
+- axios - For making API requests
+
+**UI/UX:**
+- expo-linear-gradient - Gradient backgrounds (optional, for polish)
+
+**Why these specific libraries:**
+
+Expo: Framework that simplifies React Native development. Handles native modules without Xcode/Android Studio.
+
+React Navigation: Most popular navigation library. Stack navigator gives you push/pop screen behavior like native apps.
+
+Axios: Cleaner API than fetch, handles request/response transformations easily.
+
+### The DevDependencies Section
+
+Libraries needed only during development:
+
+- @babel/core - JavaScript compiler (required by React Native)
+
+Typically minimal because Expo handles most dev tooling.
+
+### The Scripts Section
+
+Define npm commands:
+
+**"start" script:**
+Runs "expo start" - starts the development server.
+
+**"android" script:**
+Runs "expo start --android" - starts server and opens on Android emulator/device.
+
+**"ios" script:**
+Runs "expo start --ios" - starts server and opens on iOS simulator (Mac only).
+
+**"web" script:**
+Runs "expo start --web" - runs in web browser (for quick testing).
+
+**Why these scripts:**
+Convenient shortcuts. Instead of typing "expo start --android", you just run "npm run android".
+
+### Version Considerations
+
+Use tilde (~) or caret (^) prefixes:
+- Tilde (~1.2.3) - Allow patch updates (1.2.4, 1.2.5 but not 1.3.0)
+- Caret (^1.2.3) - Allow minor updates (1.3.0, 1.4.0 but not 2.0.0)
+
+For Expo projects, usually use caret to get minor updates (bug fixes and features) but avoid breaking changes.
+
+### The Private Field
+
+Set "private": true - prevents accidental publishing to npm registry. Your app is not a library, so it shouldn't be published.
+
+### After Creating This File
+
+Run "npm install" (or "yarn install") in the frontend directory. This reads package.json and downloads all dependencies into node_modules folder.
+
+**Check that it works:**
+Should complete without errors. If you see dependency conflict warnings, that's usually okay. If you see errors, Google the error message - usually fixable by updating versions.
+
+### What You're Learning
+
+- **Package management:** How npm/yarn work
+- **Dependency graphs:** Libraries depend on other libraries
+- **Semantic versioning:** Major.minor.patch version numbers
+- **Build tooling:** The ecosystem around JavaScript projects
+
+### Common Mistakes
+
+❌ Mismatched versions (Expo 50 with React 17 - incompatible)
+❌ Forgetting to run npm install after creating file
+❌ Adding dependencies manually instead of using npm install <package>
+❌ Not setting private: true (accidentally publishable)
+
+---
+
+## FILE 10: `frontend/app.json`
+
+### When to Code This
+After package.json
+
+### Time Estimate
+15-20 minutes
+
+### What This File Does
+
+Expo configuration file. Defines app settings, icons, splash screen, build configurations, and more.
+
+### The Expo Configuration Object
+
+Your file contains one large JSON object with an "expo" key.
+
+**Essential fields:**
+
+**name:**
+"CineMatch" - Human-readable app name, shown under icon on home screen.
+
+**slug:**
+"cinematch" - URL-safe identifier, used in Expo Go and URLs.
+
+**version:**
+"1.0.0" - Your app's version number. Increment with each release.
+
+**orientation:**
+"portrait" - Lock to portrait mode. Users can't rotate to landscape. If you want to allow rotation, use "default".
+
+**icon:**
+"./assets/icon.png" - Path to app icon image (1024x1024 PNG recommended).
+
+**splash:**
+Object with:
+- image: "./assets/splash.png"
+- resizeMode: "contain"
+- backgroundColor: "#1a1a1a" (dark background)
+
+Splash screen shows while app loads.
+
+**platforms:**
+Array: ["ios", "android"] - Which platforms you're targeting. You can also include "web" if supporting web browsers.
+
+**ios:**
+Object with:
+- supportsTablet: true - App works on iPads
+- bundleIdentifier: "com.yourname.cinematch" - Unique identifier for App Store (reverse domain format)
+
+**android:**
+Object with:
+- adaptiveIcon: Object with foreground and background images
+- package: "com.yourname.cinematch" - Unique identifier for Play Store (reverse domain format)
+- versionCode: 1 - Integer version for Android (increment with each release)
+
+**extra:**
+Object for custom config you want to access in your code. Add:
+- apiUrl: "http://192.168.1.100:8000/api" - Your backend URL
+
+**Why apiUrl here:**
+You'll access it using expo-constants. Easier than hardcoding in files. Can have different URLs for dev/staging/production.
+
+**Replace the IP address:**
+Use your computer's local network IP (run "ifconfig" on Mac/Linux or "ipconfig" on Windows). Don't use localhost - it won't work from a phone.
+
+### Assets
+
+You need two images:
+
+**icon.png (in assets folder):**
+1024x1024 PNG, transparent or solid background. Your app's logo.
+
+**splash.png (in assets folder):**
+2048x2048 PNG. Shown while app loads.
+
+For now, you can use placeholder images or simple colored squares. Design them later.
+
+### Bundle Identifiers
+
+**Format:** com.yourname.appname
+
+**Rules:**
+- All lowercase
+- Reverse domain notation (com.myname.myapp)
+- Must be globally unique
+- Used by app stores to identify your app
+
+**Choose carefully:**
+Can't change after publishing to app stores. Use your real domain if you have one, or use a pattern like com.github.yourusername.cinematch.
+
+### Version Numbers
+
+**version (string):**
+Semantic version shown to users. "1.0.0" → "1.1.0" → "2.0.0"
+
+**versionCode (Android integer):**
+Internal version. Must increment with every release. 1 → 2 → 3. Google Play won't accept a build with same or lower versionCode.
+
+### Testing Your Configuration
+
+After creating app.json, run "expo start". Expo validates the config file. If there are errors, they'll show in terminal.
+
+Use Expo Go app on your phone:
+1. Download Expo Go from app store
+2. Run "expo start" on computer
+3. Scan the QR code with your phone
+4. App should load (might be blank screen - that's okay, we haven't added UI yet)
+
+### What You're Learning
+
+- **Mobile app configuration:** Platform-specific settings
+- **Asset management:** Icons, splash screens
+- **App identifiers:** Bundle IDs, package names
+- **Expo ecosystem:** How Expo simplifies React Native
+
+### Common Mistakes
+
+❌ Using localhost for apiUrl (doesn't work on phone)
+❌ Not using correct image dimensions (icon looks blurry)
+❌ Typos in bundle identifier (can't publish)
+❌ Forgetting to increment versionCode for Android updates
+
+---
+
+## FILE 11: `frontend/eas.json`
+
+### When to Code This
+After app.json, before building APK
+
+### Time Estimate
+10-15 minutes
+
+### What This File Does
+
+Configuration for EAS Build - Expo's cloud build service. This is how you'll generate the APK file for Android without needing Android Studio locally.
+
+### The Build Profiles
+
+You define different profiles for different purposes:
+
+**development profile:**
+For internal testing. Includes dev tools, connects to localhost.
+
+**preview profile:**
+For QA testing. Like production but faster builds.
+
+**production profile:**
+For release to Google Play Store. Fully optimized.
+
+### Structure
+
+Top-level keys:
+- cli: Configuration for EAS CLI
+- build: Build profiles
+
+**cli section:**
+- version: "latest" - Use latest CLI version
+
+**build section:**
+
+**development profile:**
+- developmentClient: true - Includes Expo dev client
+- distribution: "internal" - Not for stores
+- android: Object with buildType: "apk" or "apk"
+
+**preview profile:**
+- distribution: "internal"
+- android: Object with buildType: "apk"
+
+**production profile:**
+- android: Object with buildType: "app-bundle" - AAB format for Play Store
+
+**APK vs AAB:**
+- APK: Single file installable directly on Android devices
+- AAB (Android App Bundle): Optimized format for Play Store, smaller downloads
+
+For testing, you want APK. For publishing, you need AAB.
+
+### Building Your First APK
+
+After creating this file:
+
+**Step 1: Install EAS CLI**
+Run "npm install -g eas-cli" globally.
+
+**Step 2: Login to Expo**
+Run "eas login" and use your Expo account (create one at expo.dev if needed).
+
+**Step 3: Configure project**
+Run "eas build:configure" in your frontend folder. This may add/update eas.json.
+
+**Step 4: Start build**
+Run "eas build --platform android --profile preview".
+
+**Step 5: Wait**
+Build happens in the cloud. Takes 10-20 minutes. You'll get a URL to download the APK when done.
+
+**Step 6: Install**
+Transfer APK to your Android device and install it. You may need to enable "Install from unknown sources" in settings.
+
+### Free Tier Limits
+
+Expo offers free builds but with limits (number of builds per month). Check current limits on expo.dev. For your project, preview builds are usually enough during development.
+
+### What You're Learning
+
+- **Mobile app building:** How native apps are compiled
+- **Cloud build services:** Remote building without local setup
+- **Distribution formats:** APK vs AAB
+- **CI/CD concepts:** Automated building and deployment
+
+### Common Mistakes
+
+❌ Forgetting to install EAS CLI (command not found)
+❌ Not being logged in to Expo account (build fails)
+❌ Using wrong profile (production when you want testing)
+❌ Exceeding free tier build limits (builds queued indefinitely)
+
+---
+
+## FILE 12: `frontend/App.js`
+
+### When to Code This
+After expo configuration files
+
+### Time Estimate
+30-40 minutes
+
+### What This File Does
+
+The root component of your React Native app. It sets up navigation, wraps the app with providers, and defines the overall structure.
+
+### Import Organization
+
+**React imports:**
+React and hooks (useState, useEffect) from 'react'.
+
+**React Native imports:**
+StatusBar from 'expo-status-bar'.
+
+**Navigation imports:**
+NavigationContainer from '@react-navigation/native'.
+createNativeStackNavigator from '@react-navigation/native-stack'.
+
+**Screen imports:**
+Import your screen components (HomeScreen, MovieDetailScreen, SearchResultsScreen).
+
+### Creating the Navigator
+
+Call createNativeStackNavigator to create a Stack object. This gives you Stack.Navigator and Stack.Screen components.
+
+**Stack Navigator pattern:**
+Push screens onto a stack, pop them off. Like a deck of cards - new screen slides on top, back button removes the top card.
+
+### The App Component
+
+Your main component function:
+
+**Return structure:**
+NavigationContainer wrapping Stack.Navigator wrapping multiple Stack.Screen components.
+
+**NavigationContainer:**
+Required wrapper for all navigation. Manages navigation state.
+
+**Stack.Navigator:**
+The container for your stack of screens.
+
+**Configuration:**
+- initialRouteName: "Home" - Which screen shows first
+- screenOptions: Object with style options applying to all screens
+
+**Screen options:**
+- headerStyle: backgroundColor "#1a1a1a" (dark theme)
+- headerTintColor: "#ffffff" (white text)
+- headerTitleStyle: fontWeight "bold"
+
+### Defining Screens
+
+Inside Stack.Navigator, add Stack.Screen components:
+
+**Screen 1: Home**
+- name: "Home"
+- component: HomeScreen
+- options: Object with title: "CineMatch"
+
+**Screen 2: MovieDetail**
+- name: "MovieDetail"
+- component: MovieDetailScreen
+- options: Object with title: "Movie Details"
+
+**Screen 3: SearchResults**
+- name: "SearchResults"
+- component: SearchResultsScreen
+- options: Object with title: "Search Results"
+
+**Name vs title:**
+- name: Used in code to navigate (navigation.navigate("Home"))
+- title: Shown in the header bar
+
+### StatusBar Component
+
+At the end, before closing tags, add StatusBar component with style="light" (makes status bar icons white on dark background).
+
+### Navigation Flow
+
+User opens app → NavigationContainer initializes → Stack.Navigator renders Home screen → User taps a movie → navigate("MovieDetail", { movieId: 123 }) → MovieDetailScreen pushes on top → User presses back → MovieDetailScreen pops off, Home screen visible again.
+
+### Passing Parameters
+
+When navigating, pass params as second argument:
+
+navigation.navigate("MovieDetail", { movieId: 27205 })
+
+The MovieDetailScreen component receives route prop with params:
+
+route.params.movieId equals 27205
+
+### Testing This File
+
+After writing (but before screens are built), you'll get errors about missing screen components. That's expected.
+
+Create placeholder screen components temporarily:
+- Each screen just returns a View with Text saying the screen name
+- Test that navigation works (buttons to navigate between screens)
+- Verify header styling
+- Once confirmed, build out the real screens
+
+### What You're Learning
+
+- **React component structure:** How components compose
+- **React Navigation:** Stack-based navigation pattern
+- **Props and params:** Passing data between screens
+- **App initialization:** Setting up the root component
+
+### Common Mistakes
+
+❌ Forgetting NavigationContainer wrapper (navigation errors)
+❌ Mismatched screen names (navigate("MovieDetails") but screen named "MovieDetail")
+❌ Not importing screen components (undefined component errors)
+❌ Wrong initialRouteName (app crashes or shows wrong screen)
+
+---
+
+## FILE 13: `frontend/src/services/api.js`
+
+### When to Code This
+Before building screens (screens will need this)
+
+### Time Estimate
+45-60 minutes
+
+### What This File Does
+
+Your API client - handles all HTTP communication with your backend. Screens call functions from this file instead of making axios requests directly.
+
+**Benefits:**
+- Centralized URL management
+- Consistent error handling
+- Easy to mock for testing
+- If API changes, update one file
+
+### Import and Configuration
+
+Import axios.
+
+Import Constants from expo-constants (to access the apiUrl from app.json).
+
+Create a base URL variable: get it from Constants.expoConfig.extra.apiUrl or fall back to a default like "http://localhost:8000/api".
+
+Create an axios instance with axios.create(), passing baseURL set to that URL. This preconfigures axios.
+
+### Error Handling Helper
+
+Define a function to handle errors consistently.
+
+**Function: handleApiError**
+**Parameter:** error (the caught exception)
+
+**Logic:**
+Check if error.response exists (means server responded with error status).
+
+If it exists:
+- Extract status and data from error.response
+- Log the error with console.error
+- Throw a new Error with a message like "API Error (status): message from data"
+
+If error.response doesn't exist:
+- It's a network error (server not reachable)
+- Log it
+- Throw new Error "Network error: check backend is running"
+
+**Why a helper:**
+Every API function will use the same error handling pattern. Don't repeat yourself.
+
+### The Five API Functions
+
+#### Function 1: searchMovies
+
+**Purpose:** Search for movies by title
+
+**Parameters:**
+- query (string) - search term
+- page (number) - default 1
+
+**Implementation:**
+Try block:
+- Call axios instance's post method with "/search" and a body object containing query and page
+- Return response.data
+
+Catch block:
+- Call handleApiError with the error
+
+**Return value:**
+SearchResponse object with results array and pagination metadata.
+
+**Usage example:**
+Screen calls searchMovies("Inception") → gets array of movie summaries back → renders them in a list.
+
+#### Function 2: getMovieDetails
+
+**Purpose:** Get full details for a movie
+
+**Parameters:**
+- movieId (number)
+
+**Implementation:**
+Try block:
+- Call axios instance's get method with "/movie/${movieId}" (template string)
+- Return response.data
+
+Catch block:
+- Call handleApiError
+
+**Return value:**
+MovieDetail object with all fields (cast, crew, genres, etc.).
+
+**Usage example:**
+User taps movie 27205 → Screen calls getMovieDetails(27205) → gets full movie object → displays on detail screen.
+
+#### Function 3: getRecommendations
+
+**Purpose:** Get content-based recommendations
+
+**Parameters:**
+- movieId (number)
+- topK (number) - default 10
+
+**Implementation:**
+Try block:
+- Call axios instance's post method with "/recommendations" and body { movie_id: movieId, top_k: topK }
+- Return response.data.recommendations (extract just the recommendations array from the response)
+
+Catch block:
+- Call handleApiError
+
+**Return value:**
+Array of RecommendationItem objects (each has movie, score, reason).
+
+**Usage example:**
+On movie detail screen, call getRecommendations(27205) → get array of 10 similar movies → display in "You might also like" section.
+
+#### Function 4: checkHealth
+
+**Purpose:** Check if backend is reachable
+
+**Parameters:** None
+
+**Implementation:**
+Try block:
+- Call axios instance's get method with "/health"
+- Return response.data
+
+Catch block:
+- Call handleApiError
+
+**Return value:**
+Object with status: "healthy".
+
+**Usage example:**
+On app startup, call checkHealth() to verify backend is running. If it throws error, show alert to user: "Can't connect to server".
+
+#### Function 5: searchByGenre (optional bonus)
+
+If you want to add genre filtering:
+
+**Parameters:**
+- genreId (number)
+
+**Implementation:**
+You could add a /genres/{genreId} endpoint to your backend that uses discover_by_genres. Not essential for MVP but nice to have.
+
+### Exporting the API
+
+Export an object containing all functions:
+
+export default object with: searchMovies, getMovieDetails, getRecommendations, checkHealth
+
+### Using in Screens
+
+In your screen files:
+
+import api from '../services/api'
+
+Then call: api.searchMovies("Avatar"), api.getMovieDetails(movieId), etc.
+
+### Testing the API Client
+
+Before using in screens, test it:
+
+Create a simple test file that imports api and calls each function. Run it with node (but you'll need to adjust imports since React Native modules won't work in Node).
+
+Better: Test directly in a screen:
+- Create a button in HomeScreen
+- OnPress, call api.checkHealth() and log the result
+- If it works, you know your backend is reachable
+
+### What You're Learning
+
+- **API client patterns:** Abstracting HTTP calls
+- **Axios usage:** Making requests, handling responses
+- **Error handling:** Try/catch, throwing meaningful errors
+- **Module exports:** Creating reusable modules
+
+### Common Mistakes
+
+❌ Hardcoding URLs instead of using baseURL (change is painful)
+❌ Not handling network errors (app crashes when offline)
+❌ Forgetting await on async calls (promises instead of values)
+❌ Wrong endpoint URLs (typos cause 404 errors)
+
+---
+
+## FILE 14: `frontend/src/components/SearchBar.js`
+
+### When to Code This
+After api.js, before HomeScreen
+
+### Time Estimate
+30-40 minutes
+
+### What This File Does
+
+A reusable search bar component with a text input and search button. Used on the home screen for searching movies.
+
+### Import Organization
+
+**React imports:**
+React, useState from 'react'.
+
+**React Native imports:**
+View, TextInput, TouchableOpacity, Text, StyleSheet from 'react-native'.
+
+### The SearchBar Component
+
+**Props:**
+- onSearch (function) - Callback when search is triggered, receives the query string
+
+**State:**
+Use useState to manage the text input value. Initial value empty string.
+
+### Component Structure
+
+Return a View (the container):
+
+**Inside the View:**
+
+**Element 1: TextInput**
+- value prop: The state variable
+- onChangeText prop: The state setter function
+- placeholder: "Search for a movie..."
+- placeholderTextColor: "#888888" (gray text)
+- style: styles.input (you'll define below)
+- returnKeyType: "search" (shows search button on keyboard)
+- onSubmitEditing: Call the onSearch prop with the current value (allows searching by pressing enter/search on keyboard)
+
+**Element 2: TouchableOpacity (Search button)**
+- onPress: Call onSearch prop with current value
+- style: styles.button
+- activeOpacity: 0.7 (slight fade when pressed)
+
+**Inside TouchableOpacity:**
+Text component with text "Search" and style styles.buttonText.
+
+### The Styles
+
+Use StyleSheet.create to define styles:
+
+**container style:**
+- flexDirection: "row" (input and button side by side)
+- alignItems: "center" (vertically center)
+- backgroundColor: "#2a2a2a" (dark gray)
+- borderRadius: 8 (rounded corners)
+- paddingHorizontal: 12
+- paddingVertical: 4
+- marginHorizontal: 16 (space from screen edges)
+- marginVertical: 16
+
+**input style:**
+- flex: 1 (takes available space)
+- color: "#ffffff" (white text)
+- fontSize: 16
+- paddingVertical: 8
+
+**button style:**
+- backgroundColor: "#e50914" (Netflix-ish red, or choose your brand color)
+- paddingHorizontal: 20
+- paddingVertical: 10
+- borderRadius: 6
+
+**buttonText style:**
+- color: "#ffffff"
+- fontWeight: "bold"
+- fontSize: 14
+
+### Behavior
+
+User types in TextInput → state updates with each keystroke → User presses Search button or hits enter on keyboard → onSearch callback fires with the query → Parent component (HomeScreen) handles the search (calls API, navigates to results).
+
+### Validation
+
+Add validation before calling onSearch:
+
+If query is empty or only whitespace, don't call onSearch. Optionally show an alert: "Please enter a search term".
+
+Use query.trim() to remove leading/trailing whitespace.
+
+### Accessibility
+
+For production apps, add accessibility props:
+- accessibilityLabel: "Search for movies"
+- accessibilityHint: "Enter a movie title"
+
+Not critical for MVP but good practice.
+
+### Testing the Component
+
+Create it in isolation first:
+
+In HomeScreen, render SearchBar with onSearch prop that just logs the query. Type in the input, press search, check console for the query.
+
+### What You're Learning
+
+- **Controlled components:** State-driven inputs
+- **Event handling:** onPress, onChangeText callbacks
+- **Styling:** Flexbox layout, colors, spacing
+- **Component reusability:** Props make components flexible
+
+### Common Mistakes
+
+❌ Not using controlled component pattern (value and onChangeText)
+❌ Forgetting to trim whitespace (empty searches go through)
+❌ Hard-to-tap buttons (too small, insufficient padding)
+❌ Not handling empty query (API error or wasted request)
+
+---
+
+## FILE 15: `frontend/src/components/MovieCard.js`
+
+### When to Code This
+After SearchBar, before screens use it
+
+### Time Estimate
+45-60 minutes
+
+### What This File Does
+
+A reusable card component displaying a movie's poster, title, year, and rating. Used in search results and recommendations lists.
+
+### Import Organization
+
+**React imports:**
+React from 'react'.
+
+**React Native imports:**
+View, Text, Image, TouchableOpacity, StyleSheet from 'react-native'.
+
+### The MovieCard Component
+
+**Props:**
+- movie (object) - A MovieSummary with id, title, poster_path, release_date, vote_average
+- onPress (function) - Callback when card is tapped, receives movie object
+
+### Component Structure
+
+Return a TouchableOpacity (makes entire card tappable):
+- onPress: Call onPress prop with movie object
+- activeOpacity: 0.8
+- style: styles.container
+
+**Inside TouchableOpacity:**
+
+**Element 1: Poster Image**
+Check if movie.poster_path exists.
+
+If it exists:
+- Render Image component
+- source prop: { uri: "https://image.tmdb.org/t/p/w500${movie.poster_path}" }
+- style: styles.poster
+- resizeMode: "cover"
+
+If poster_path is null:
+- Render View with styles.posterPlaceholder
+- Inside it, Text saying "No Image"
+
+**Element 2: Info Container**
+View with styles.info containing:
+
+**Title Text:**
+- Text component with movie.title
+- style: styles.title
+- numberOfLines: 2 (truncate if too long)
+- ellipsizeMode: "tail" (add ... at end)
+
+**Year Text:**
+- Extract year from movie.release_date (first 4 characters)
+- Text component displaying the year
+- style: styles.year
+
+**Rating Text:**
+- Display movie.vote_average formatted to 1 decimal place
+- Add a star symbol (use "⭐" or "★")
+- Text component: "⭐ vote_average/10"
+- style: styles.rating
+
+### TMDB Image URLs
+
+TMDB poster paths are relative (like "/abc123.jpg"). You need to construct full URL:
+
+Base URL: "https://image.tmdb.org/t/p/"
+
+Size: Use "w500" for 500px width (good balance of quality and loading speed)
+
+Full URL: base + size + poster_path
+
+### The Styles
+
+**container:**
+- width: 150 (fixed width for grid layout)
+- marginHorizontal: 8
+- marginVertical: 8
+- backgroundColor: "#2a2a2a"
+- borderRadius: 8
+- overflow: "hidden" (clips image to rounded corners)
+
+**poster:**
+- width: 150 (match container)
+- height: 225 (3:2 aspect ratio like movie posters)
+
+**posterPlaceholder:**
+- Same dimensions as poster
+- backgroundColor: "#1a1a1a"
+- justifyContent: "center"
+- alignItems: "center"
+
+**info:**
+- padding: 8
+
+**title:**
+- color: "#ffffff"
+- fontSize: 14
+- fontWeight: "600"
+- marginBottom: 4
+
+**year:**
+- color: "#888888"
+- fontSize: 12
+- marginBottom: 4
+
+**rating:**
+- color: "#ffb900" (gold/yellow for rating)
+- fontSize: 12
+- fontWeight: "bold"
+
+### Handling Missing Data
+
+Not all movies have all fields. Handle gracefully:
+- No poster: Show placeholder
+- No release_date: Don't show year or show "N/A"
+- vote_average is 0: Show "Not Rated" instead of "0.0/10"
+
+Use conditional rendering and optional chaining.
+
+### Layout Considerations
+
+This card is designed for use in FlatList with numColumns (grid layout). The fixed width allows clean grid arrangements.
+
+### Testing the Component
+
+Render a single MovieCard with test data:
+
+movie object with id: 1, title: "Test Movie", poster_path: "/test.jpg", release_date: "2024-01-01", vote_average: 7.5
+
+onPress function that logs the movie
+
+Tap it, verify onPress fires, verify image loads, verify text displays correctly.
+
+### What You're Learning
+
+- **Component composition:** Building UI from smaller pieces
+- **Image handling:** Remote URLs, placeholders, loading states
+- **Touch interactions:** Making components tappable
+- **Responsive design:** Fixed vs flexible sizing
+
+### Common Mistakes
+
+❌ Not handling null poster_path (image fails to load)
+❌ Wrong image URL format (broken images)
+❌ Not truncating long titles (breaks layout)
+❌ Forgetting to pass onPress (cards not tappable)
+
+---
+
+## FILE 16: `frontend/src/screens/HomeScreen.js`
+
+### When to Code This
+After components are complete
+
+### Time Estimate
+60-90 minutes
+
+### What This File Does
+
+The main landing screen. Shows a search bar, featured movies, and handles navigation to search results or movie details.
+
+### Import Organization
+
+**React imports:**
+React, useState, useEffect from 'react'.
+
+**React Native imports:**
+View, Text, FlatList, StyleSheet, ActivityIndicator, Alert from 'react-native'.
+
+**Component imports:**
+SearchBar from '../components/SearchBar'.
+MovieCard from '../components/MovieCard'.
+
+**Service imports:**
+api from '../services/api'.
+
+### The HomeScreen Component
+
+**Props:**
+- navigation (provided by React Navigation automatically)
+
+**State variables:**
+- featured Movies (array, initial empty)
+- loading (boolean, initial true)
+
+### Component Structure
+
+**useEffect hook (runs on mount):**
+Define an async function inside the useEffect. This function fetches featured movies.
+
+**What the function does:**
+1. Call api.searchMovies with query "popular" (or you could call a trending endpoint if you add one).
+2. Extract the results array from the response.
+3. Slice to first 20 movies (don't need all of them).
+4. Set the featuredMovies state.
+5. Set loading to false.
+
+**Error handling:**
+Wrap in try/catch. If error, show an Alert with the error message and set loading false.
+
+**The dependency array:**
+Empty array (run only once on mount).
+
+**Call the async function:**
+After defining it, call it immediately (since useEffect can't be async directly).
+
+### Handler Functions
+
+**handleSearch function:**
+- Parameter: query (string)
+- Validates query is not empty after trimming
+- If valid, navigate to SearchResults screen passing { query } as params
+- If invalid, show Alert asking user to enter a search term
+
+**handleMoviePress function:**
+- Parameter: movie (object)
+- Navigate to MovieDetail screen passing { movieId: movie.id } as params
+
+### Render Logic
+
+**If loading:**
+Return a View centered on screen with ActivityIndicator (loading spinner) and text "Loading...".
+
+**If not loading:**
+Return a View (main container) with styles.container:
+
+**Element 1: SearchBar**
+- onSearch prop: handleSearch function
+
+**Element 2: Section Header**
+- Text component: "Featured Movies"
+- style: styles.sectionHeader
+
+**Element 3: FlatList**
+- data prop: featuredMovies array
+- renderItem prop: Function that receives { item } and returns MovieCard with movie={item} and onPress={handleMoviePress}
+- keyExtractor prop: item => item.id.toString()
+- numColumns: 2 (two-column grid)
+- columnWrapperStyle: styles.row (space between columns)
+- contentContainerStyle: styles.listContent (padding around list)
+- showsVerticalScrollIndicator: false (cleaner look)
+
+### The Styles
+
+**container:**
+- flex: 1 (fill screen)
+- backgroundColor: "#1a1a1a" (dark background)
+
+**loadingContainer:**
+- flex: 1
+- justifyContent: "center"
+- alignItems: "center"
+- backgroundColor: "#1a1a1a"
+
+**loadingText:**
+- color: "#ffffff"
+- marginTop: 10
+- fontSize: 16
+
+**sectionHeader:**
+- color: "#ffffff"
+- fontSize: 20
+- fontWeight: "bold"
+- marginHorizontal: 16
+- marginBottom: 8
+
+**listContent:**
+- paddingBottom: 20
+
+**row:**
+- justifyContent: "space-between" (or "space-around")
+- paddingHorizontal: 8
+
+### Screen Flow
+
+User opens app → HomeScreen mounts → useEffect runs → Fetches featured movies → Shows loading spinner → Data loads → Renders search bar and grid of movies → User types in search bar and presses search → Navigates to SearchResults → OR user taps a movie card → Navigates to MovieDetail.
+
+### Alternative: Trending Movies
+
+Instead of searching for "popular", you could add a /trending endpoint to your backend that calls TMDB's trending API. More appropriate for a home screen.
+
+Or fetch multiple categories (Popular, Top Rated, etc.) and show multiple horizontal scrolling lists.
+
+For MVP, a simple search for popular movies works fine.
+
+### Error State
+
+If fetching featured movies fails, you could show an error message instead of an empty screen. Add an error state variable and render error UI when it's set.
+
+### What You're Learning
+
+- **Screen components:** Full-screen UI with navigation
+- **useEffect for data fetching:** Side effects in React
+- **Loading states:** Showing spinners while data loads
+- **Lists and grids:** FlatList with numColumns
+- **Navigation:** Moving between screens with parameters
+
+### Common Mistakes
+
+❌ Not handling loading state (blank screen while fetching)
+❌ Not handling errors (app crashes on network failure)
+❌ Forgetting keyExtractor (React warnings)
+❌ Not trimming search query (empty searches)
+❌ Wrong numColumns (doesn't match MovieCard width)
+
+---
+
+## FILE 17: `frontend/src/screens/MovieDetailScreen.js`
+
+### When to Code This
+After HomeScreen
+
+### Time Estimate
+90-120 minutes
+
+### What This File Does
+
+Shows comprehensive details for a single movie: poster, title, overview, cast, crew, genres, and recommendations. The most complex screen.
+
+### Import Organization
+
+**React imports:**
+React, useState, useEffect from 'react'.
+
+**React Native imports:**
+View, Text, Image, ScrollView, FlatList, StyleSheet, ActivityIndicator, Dimensions from 'react-native'.
+
+**Component imports:**
+MovieCard from '../components/MovieCard'.
+
+**Service imports:**
+api from '../services/api'.
+
+### The MovieDetailScreen Component
+
+**Props:**
+- navigation (from React Navigation)
+- route (from React Navigation, contains params)
+
+**State variables:**
+- movie (object or null, initial null)
+- recommendations (array, initial empty)
+- loading (boolean, initial true)
+
+**Extract movie ID:**
+const movieId = route.params.movieId
+
+### Component Structure
+
+**useEffect hook:**
+Define an async function to fetch data.
+
+**What the function does:**
+1. Call api.getMovieDetails(movieId).
+2. Set the movie state with the result.
+3. Call api.getRecommendations(movieId, 10).
+4. Set the recommendations state with the result.
+5. Set loading to false.
+
+**Error handling:**
+Try/catch, show Alert on error, set loading false.
+
+**Dependencies:**
+[movieId] - refetch if movieId changes (happens if user navigates from one movie detail to another).
+
+### Handler Functions
+
+**handleRecommendationPress function:**
+- Parameter: recommendedMovie (object, from recommendations array)
+- Extract the nested movie object: recommendedMovie.movie (remember recommendations have { movie, score, reason })
+- Navigate to MovieDetail with { movieId: movie.id }
+- This allows navigating from one movie detail to another seamlessly
+
+### Render Logic
+
+**If loading or movie is null:**
+Return centered loading view with spinner.
+
+**If movie loaded:**
+Return a ScrollView (allows scrolling the entire screen):
+
+**Section 1: Backdrop Image**
+- Check if movie.backdrop_path exists
+- If yes, render Image with source using TMDB backdrop URL (same pattern as poster but use w780 size for backdrops)
+- Style: full width, height 200, resizeMode "cover"
+- If no backdrop, skip this section or show solid color View
+
+**Section 2: Poster and Basic Info**
+- View container with flexDirection "row", padding
+- Left side: Image with poster (w342 size, 120x180 dimensions)
+- Right side: View with flex 1, marginLeft 16
+  - Title Text (fontSize 24, fontWeight "bold", color white)
+  - Year Text (extract from release_date, color gray)
+  - Rating Text (vote_average with star emoji, color gold)
+  - Runtime Text (if exists, format as "120 min", color gray)
+
+**Section 3: Genres**
+- View with flexDirection "row", flexWrap "wrap", marginVertical
+- Map over movie.genres array
+- For each genre, render a small pill/badge View with:
+  - Genre name as Text
+  - backgroundColor "#333", borderRadius 12, padding horizontal 10, vertical 4
+  - marginRight 8, marginBottom 8
+  - Text color white, fontSize 12
+
+**Section 4: Tagline**
+- If movie.tagline exists, render Text with italic styling, color gray, marginVertical
+
+**Section 5: Overview**
+- Text header "Overview" (fontSize 18, fontWeight "bold", color white, marginBottom 8)
+- Text with movie.overview (fontSize 14, color "#ccc", lineHeight 20)
+
+**Section 6: Cast**
+- Text header "Cast" (same style as Overview header)
+- Horizontal ScrollView (showsHorizontalScrollIndicator false)
+- Map over movie.cast (slice to first 10)
+- For each cast member, render a small card:
+  - View with width 80, marginRight 12
+  - Image with profile_path if exists (w185 size, 80x120)
+  - Text with name (fontSize 12, color white, numberOfLines 2)
+  - Text with character (fontSize 10, color gray, numberOfLines 1)
+
+**Section 7: Crew**
+- Text header "Crew"
+- Map over movie.crew (filter to Director, Writer, Producer only)
+- For each crew member, render:
+  - View with flexDirection "row", marginBottom 4
+  - Text with job (fontSize 12, color white, fontWeight "bold", width 80)
+  - Text with name (fontSize 12, color gray)
+
+**Section 8: Recommendations**
+- Text header "You Might Also Like"
+- Check if recommendations array has items
+- If yes, render horizontal FlatList:
+  - data: recommendations
+  - renderItem: Extract item.movie (the nested MovieSummary), pass to MovieCard with onPress handleRecommendationPress
+  - horizontal: true
+  - keyExtractor: item => item.movie.id.toString()
+  - showsHorizontalScrollIndicator: false
+- If no recommendations, show Text "No recommendations available"
+
+### The Styles
+
+**scrollContainer:**
+- backgroundColor: "#1a1a1a"
+
+**backdrop:**
+- width: Dimensions.get('window').width (full width)
+- height: 200
+
+**posterInfoContainer:**
+- flexDirection: "row"
+- padding: 16
+
+**poster:**
+- width: 120
+- height: 180
+- borderRadius: 8
+
+**infoContainer:**
+- flex: 1
+- marginLeft: 16
+
+**title:**
+- fontSize: 24
+- fontWeight: "bold"
+- color: "#ffffff"
+- marginBottom: 8
+
+**detailText:**
+- fontSize: 14
+- color: "#888888"
+- marginBottom: 4
+
+**rating:**
+- fontSize: 16
+- color: "#ffb900"
+- fontWeight: "bold"
+- marginVertical: 4
+
+**sectionHeader:**
+- fontSize: 18
+- fontWeight: "bold"
+- color: "#ffffff"
+- marginHorizontal: 16
+- marginTop: 16
+- marginBottom: 8
+
+**overview:**
+- fontSize: 14
+- color: "#cccccc"
+- lineHeight: 20
+- marginHorizontal: 16
+- marginBottom: 16
+
+**genreContainer:**
+- flexDirection: "row"
+- flexWrap: "wrap"
+- marginHorizontal: 16
+- marginVertical: 8
+
+**genrePill:**
+- backgroundColor: "#333333"
+- borderRadius: 12
+- paddingHorizontal: 10
+- paddingVertical: 4
+- marginRight: 8
+- marginBottom: 8
+
+**genreText:**
+- color: "#ffffff"
+- fontSize: 12
+
+**castCard:**
+- width: 80
+- marginRight: 12
+
+**castImage:**
+- width: 80
+- height: 120
+- borderRadius: 8
+- marginBottom: 4
+
+**castName:**
+- fontSize: 12
+- color: "#ffffff"
+- numberOfLines: 2
+
+**castCharacter:**
+- fontSize: 10
+- color: "#888888"
+- numberOfLines: 1
+
+**crewItem:**
+- flexDirection: "row"
+- marginHorizontal: 16
+- marginBottom: 4
+
+**crewJob:**
+- fontSize: 12
+- color: "#ffffff"
+- fontWeight: "bold"
+- width: 80
+
+**crewName:**
+- fontSize: 12
+- color: "#888888"
+
+### Image URL Handling
+
+TMDB image sizes:
+- Posters: w342 for detail screen (better quality than w185)
+- Backdrops: w780 (wide horizontal images)
+- Profiles (cast): w185
+
+Always check if image path exists before rendering Image component.
+
+### Navigation Considerations
+
+When user taps a recommendation, you navigate to the same screen (MovieDetailScreen) but with a different movieId. React Navigation handles this by updating the params, and your useEffect with [movieId] dependency will re-run, fetching new data.
+
+### Performance
+
+This screen fetches a lot of data and renders many images. To optimize:
+- Use FlatList for recommendations (already done)
+- Consider lazy loading images (advanced)
+- Limit the number of cast members shown
+- Cache API responses (future enhancement)
+
+### What You're Learning
+
+- **Complex layouts:** Combining multiple UI patterns
+- **Image galleries:** Horizontal scrolling lists
+- **Nested navigation:** Navigating within same screen
+- **Data transformation:** Filtering and mapping complex objects
+- **Responsive design:** Using Dimensions for full-width elements
+
+### Common Mistakes
+
+❌ Not checking for null/undefined before accessing nested properties (crashes)
+❌ Not slicing cast array (renders 50+ cards, slow)
+❌ Wrong image URL sizes (blurry or unnecessarily large)
+❌ Forgetting to extract nested movie from recommendations (undefined errors)
+❌ Not handling missing data (crashes when fields don't exist)
+
+---
+
+## FILE 18: `frontend/src/screens/SearchResultsScreen.js`
+
+### When to Code This
+After MovieDetailScreen
+
+### Time Estimate
+45-60 minutes
+
+### What This File Does
+
+Displays search results in a grid. Allows loading more results (pagination). Simpler than detail screen but with pagination logic.
+
+### Import Organization
+
+**React imports:**
+React, useState, useEffect from 'react'.
+
+**React Native imports:**
+View, Text, FlatList, StyleSheet, ActivityIndicator from 'react-native'.
+
+**Component imports:**
+MovieCard from '../components/MovieCard'.
+
+**Service imports:**
+api from '../services/api'.
+
+### The SearchResultsScreen Component
+
+**Props:**
+- navigation
+- route (contains { query } params)
+
+**State variables:**
+- results (array, initial empty)
+- loading (boolean, initial true)
+- loadingMore (boolean, initial false)
+- page (number, initial 1)
+- hasMore (boolean, initial true)
+
+**Extract query:**
+const query = route.params.query
+
+### Component Structure
+
+**useEffect hook:**
+Define async function to perform initial search.
+
+**What the function does:**
+1. Set loading true.
+2. Call api.searchMovies(query, 1).
+3. Set results to response.results.
+4. Set hasMore to page < response.total_pages.
+5. Set loading false.
+
+**Error handling:**
+Try/catch, Alert on error.
+
+**Dependencies:**
+[query] - if query changes (user performs new search from this screen), refetch.
+
+### Handler Functions
+
+**handleLoadMore function:**
+Called when user scrolls to the end of the list.
+
+**Logic:**
+- Check if already loading or loadingMore or not hasMore - if any are true, return early (prevent duplicate loads).
+- Set loadingMore true.
+- Increment page: const nextPage = page + 1.
+- Call api.searchMovies(query, nextPage).
+- Append new results to existing results: setResults([...results, ...response.results]).
+- Set page to nextPage.
+- Update hasMore based on nextPage < response.total_pages.
+- Set loadingMore false.
+
+**Error handling:**
+Try/catch, Alert on error, set loadingMore false.
+
+**handleMoviePress function:**
+- Parameter: movie (object)
+- Navigate to MovieDetail with { movieId: movie.id }
+
+### Render Logic
+
+**If loading (initial load):**
+Return centered loading view.
+
+**If results loaded:**
+Return View container with:
+
+**Header section:**
+- Text showing query: "Results for '{query}'"
+- style: styles.header
+
+**FlatList:**
+- data: results
+- renderItem: MovieCard with movie and onPress
+- keyExtractor: item.id.toString()
+- numColumns: 2
+- columnWrapperStyle: styles.row
+- onEndReached: handleLoadMore (triggers when scrolling near bottom)
+- onEndReachedThreshold: 0.5 (trigger when 50% from bottom)
+- ListFooterComponent: If loadingMore, show ActivityIndicator
+- ListEmptyComponent: If results empty, show Text "No results found"
+
+### The Styles
+
+**container:**
+- flex: 1
+- backgroundColor: "#1a1a1a"
+
+**header:**
+- fontSize: 18
+- fontWeight: "bold"
+- color: "#ffffff"
+- marginHorizontal: 16
+- marginVertical: 16
+
+**row:**
+- justifyContent: "space-between"
+- paddingHorizontal: 8
+
+**footer:**
+- paddingVertical: 20
+- alignItems: "center"
+
+**emptyText:**
+- color: "#888888"
+- fontSize: 16
+- textAlign: "center"
+- marginTop: 50
+
+### Pagination Explained
+
+**onEndReached:**
+FlatList calls this function when user scrolls close to the end. Perfect for loading more items.
+
+**onEndReachedThreshold:**
+How close to the end before triggering. 0.5 means trigger when the end of the list is within half a screen's distance.
+
+**Preventing duplicate loads:**
+The checks in handleLoadMore (loading, loadingMore, hasMore) prevent calling the API multiple times for the same page.
+
+**Appending results:**
+Use spread operator to combine existing and new results. Don't replace the array or you lose previous pages.
+
+### Edge Cases
+
+**No results:**
+If results array is empty after loading, show "No results found" message.
+
+**Last page:**
+When hasMore is false, don't show footer loading indicator. User has reached the end.
+
+**Very long queries:**
+If query is extremely long, it might break the header layout. Consider truncating or using ellipsis.
+
+### What You're Learning
+
+- **Pagination:** Loading data in chunks
+- **Infinite scroll:** onEndReached pattern
+- **State management:** Managing multiple loading states
+- **User feedback:** Loading indicators for different states
+
+### Common Mistakes
+
+❌ Not preventing duplicate loads (multiple API calls for same page)
+❌ Replacing results instead of appending (previous pages disappear)
+❌ Not handling empty results (blank screen)
+❌ Triggering loadMore on every scroll (API spam)
+❌ Wrong onEndReachedThreshold (loads too early or too late)
+
+---
+
+## TESTING YOUR COMPLETE APP
+
+After completing all files, test the entire flow:
+
+### Backend Testing
+
+1. **Start backend:** cd backend, activate venv, run python main.py
+2. **Check health:** Visit http://localhost:8000/api/health
+3. **View docs:** Visit http://localhost:8000/docs
+4. **Test search:** Use Swagger to search for "Avatar"
+5. **Test details:** Get details for a movie ID from search results
+6. **Test recommendations:** Get recommendations for that movie ID
+7. **Verify all responses** have correct structure matching your schemas
+
+### Frontend Testing
+
+1. **Install dependencies:** cd frontend, run npm install
+2. **Start Expo:** Run npm start
+3. **Test on Expo Go:** Scan QR code with your phone
+4. **Test home screen:** Should show featured movies grid
+5. **Test search:** Type "Inception" and search
+6. **Test search results:** Should show results, try scrolling to trigger pagination
+7. **Test movie details:** Tap a movie, verify all sections load (poster, overview, cast, recommendations)
+8. **Test recommendations navigation:** Tap a recommended movie, verify it navigates to that movie's details
+9. **Test back navigation:** Press back button, verify you return to previous screen
+
+### Integration Testing
+
+The critical test: Does frontend successfully call backend?
+
+**Checklist:**
+- [ ] Backend running and accessible
+- [ ] Frontend configured with correct backend IP in app.json
+- [ ] Phone/emulator on same network as computer (if testing on device)
+- [ ] Search returns results from TMDB via your backend
+- [ ] Movie details show comprehensive info
+- [ ] Recommendations show and are tappable
+- [ ] Error messages appear if backend is stopped
+- [ ] Loading states show while fetching data
+
+### Common Integration Issues
+
+**"Network Error":**
+- Backend not running - start it
+- Wrong IP in app.json - use ipconfig/ifconfig to find correct IP
+- Firewall blocking - allow connections on port 8000
+- Different networks - phone and computer must be on same WiFi
+
+**"CORS Error":**
+- Missing or misconfigured CORS middleware in main.py
+- Check allow_origins includes "*" or your exact origin
+
+**"404 Not Found":**
+- Wrong endpoint URLs in api.js
+- Check prefix in main.py (should be "/api")
+- Typo in route definitions
+
+**Images not loading:**
+- Check image URL construction (should start with https://image.tmdb.org/t/p/)
+- Verify poster_path has leading slash
+- Check network tab in debugging tools
+
+---
+
+## BUILDING THE APK
+
+Once everything works in Expo Go, build a standalone APK:
+
+### Step 1: Prepare for Build
+
+Make sure:
+- All features work in Expo Go
+- No console errors or warnings
+- App looks good on your test device
+- Backend URL in app.json is correct (use your computer's network IP for testing, or deploy backend first for production APK)
+
+### Step 2: Install EAS CLI
+
+If not already installed:
+- Run: npm install -g eas-cli
+
+### Step 3: Configure EAS
+
+In frontend directory:
+- Run: eas build:configure
+- Select Android when prompted
+- This creates/updates eas.json
+
+### Step 4: Build Preview APK
+
+Run: eas build --platform android --profile preview
+
+**What happens:**
+- Code uploaded to Expo servers
+- Android build environment spins up
+- Dependencies installed
+- App compiled to APK
+- Takes 10-20 minutes
+
+**Output:**
+URL to download the APK file.
+
+### Step 5: Install APK
+
+**On your Android device:**
+1. Download APK from the URL
+2. Open the file (may need to enable "Install from unknown sources" in settings)
+3. Install and open
+4. App runs standalone, no Expo Go needed!
+
+### Step 6: Test Standalone App
+
+**Key differences from Expo Go:**
+- App is standalone (doesn't need Expo Go)
+- Loads faster
+- Icon and splash screen are yours
+- Behaves like a real app
+
+**Test thoroughly:**
+- All features work
+- Backend connection works (use network IP, not localhost)
+- No crashes or bugs
+- Performance is smooth
+
+---
+
+## DEPLOYMENT CONSIDERATIONS
+
+For a production app (beyond portfolio demo):
+
+### Backend Deployment
+
+**Options:**
+1. **Heroku:** Easy, free tier available, supports Python
+2. **Railway:** Modern, simple deployment
+3. **AWS EC2:** More control, requires more setup
+4. **DigitalOcean:** Good balance of simplicity and power
+
+**Steps (general):**
+1. Push code to GitHub
+2. Connect deployment platform to GitHub repo
+3. Set environment variables (TMDB API key)
+4. Deploy
+5. Get production URL (https://your-app.com)
+
+**Update frontend:**
+Change apiUrl in app.json to production URL, rebuild APK.
+
+### Frontend Deployment
+
+**For testing:**
+- Share APK with friends
+- They install directly (sideloading)
+
+**For production:**
+- Build AAB (app bundle) with: eas build --platform android --profile production
+- Create Google Play Developer account ($25 one-time fee)
+- Upload AAB to Play Store
+- Fill in store listing (screenshots, description)
+- Submit for review
+- Once approved, users download from Play Store
+
+### Security for Production
+
+**Backend:**
+- Use HTTPS (SSL certificate)
+- Restrict CORS to your frontend domain only
+- Add rate limiting to prevent abuse
+- Never commit .env files
+- Rotate API keys periodically
+
+**Frontend:**
+- Don't hardcode API keys in frontend code
+- Validate all user input
+- Handle errors gracefully (don't show stack traces to users)
+
+---
+
+## FINAL NOTES
+
+### What You've Built
+
+A full-stack, ML-powered movie recommendation app:
+- **Backend:** FastAPI with async architecture, TMDB integration, content-based ML recommender
+- **Frontend:** React Native with Expo, clean UI, smooth navigation
+- **Deployment:** APK generation, ready for Play Store
+
+### Skills Demonstrated
+
+**Backend:**
+- REST API design
+- Async Python programming
+- Third-party API integration
+- Machine learning (content-based filtering)
+- Data modeling and validation
+
+**Frontend:**
+- React Native mobile development
+- Component-based architecture
+- State management
+- Navigation
+- HTTP client implementation
+
+**Full-stack:**
+- End-to-end application development
+- Frontend-backend integration
+- Error handling across layers
+- Production build process
+
+### Next Steps for Learning
+
+**Immediate enhancements:**
+1. Add user accounts (authentication)
+2. Save favorite movies (requires database)
+3. Implement collaborative filtering (user-based recommendations)
+4. Add movie trailers (YouTube API integration)
+5. Social features (share recommendations with friends)
+
+**Advanced improvements:**
+1. Deploy to production (backend on Heroku, APK on Play Store)
+2. Add tests (pytest for backend, Jest for frontend)
+3. Implement caching (Redis) to reduce API calls
+4. Add analytics (track user behavior)
+5. Optimize performance (lazy loading, image caching)
+
+**Learning resources:**
+- FastAPI docs: fastapi.tiangolo.com
+- React Native docs: reactnative.dev
+- React Navigation: reactnavigation.org
+- Expo docs: docs.expo.dev
+- Machine learning: scikit-learn.org
+- TMDB API: developers.themoviedb.org
+
+### Portfolio Presentation
+
+When showcasing this project:
+
+**Highlight:**
+- Full-stack capability (backend + frontend)
+- ML implementation (recommender system)
+- API design skills
+- Mobile development experience
+- Problem-solving (handling TMDB data, building algorithms)
+
+**Demo flow:**
+1. Show the app working (search, browse, get recommendations)
+2. Explain the ML algorithm (content-based filtering with TF-IDF)
+3. Walk through code structure (backend layers, frontend components)
+4. Discuss challenges and solutions
+5. Show it running as a standalone APK
+
+**GitHub README:**
+- Include screenshots
+- Explain architecture with diagrams
+- List technologies used
+- Provide setup instructions
+- Link to demo video
+
+### Final Encouragement
+
+This is a substantial project - roughly 40-60 hours of focused development. Take your time with each file. Understand the concepts before moving to the next.
+
+When you get stuck:
+1. Re-read the relevant section in this guide
+2. Check official documentation
+3. Google the specific error message
+4. Ask specific questions (not "it doesn't work" but "I'm getting X error when doing Y")
+
+Every error is a learning opportunity. Professional developers spend half their time debugging. It's part of the process.
+
+You're building real skills that translate directly to job requirements. Machine learning, APIs, mobile development - these are all in-demand areas.
+
+Good luck, and enjoy building your movie recommender!
+
+---
+
+## APPENDIX: Quick Reference
+
+### Essential Commands
+
+**Backend:**
+```
+cd backend
+python -m venv venv
+source venv/bin/activate  # Mac/Linux
+venv\Scripts\activate  # Windows
+pip install -r requirements.txt
+python main.py
+```
+
+**Frontend:**
+```
+cd frontend
+npm install
+npm start
+npm run android
+```
+
+**Building APK:**
+```
+npm install -g eas-cli
+eas login
+eas build --platform android --profile preview
+```
+
+### File Checklist
+
+#### Backend (8 files)
+- [ ] requirements.txt
+- [ ] backend/app/core/config.py
+- [ ] .env and .env.example
+- [ ] backend/app/schemas/__init__.py
+- [ ] backend/app/services/__init__.py
+- [ ] backend/app/recommender/__init__.py
+- [ ] backend/app/api/__init__.py
+- [ ] backend/main.py
+
+#### Frontend (9 files)
+- [ ] frontend/package.json
+- [ ] frontend/app.json
+- [ ] frontend/eas.json
+- [ ] frontend/App.js
+- [ ] frontend/src/services/api.js
+- [ ] frontend/src/components/SearchBar.js
+- [ ] frontend/src/components/MovieCard.js
+- [ ] frontend/src/screens/HomeScreen.js
+- [ ] frontend/src/screens/MovieDetailScreen.js
+- [ ] frontend/src/screens/SearchResultsScreen.js
+
+#### Configuration (1 file)
+- [ ] .gitignore
+
+**Total:** 18 files + configuration
+
+### TMDB API Endpoints Used
+
+- GET /search/movie - Search movies
+- GET /movie/{id} - Get movie details
+- GET /movie/{id}/similar - Get similar movies
+- GET /discover/movie - Discover by genres
+
+### TMDB Image URLs
+
+- Base: https://image.tmdb.org/t/p/
+- Poster sizes: w185, w342, w500
+- Backdrop sizes: w780, w1280
+- Profile sizes: w185
+
+### HTTP Status Codes
+
+- 200: Success
+- 404: Not found
+- 429: Rate limit exceeded
+- 500: Server error
+
+### Color Scheme (Dark Theme)
+
+- Background: #1a1a1a
+- Secondary background: #2a2a2a
+- Text: #ffffff
+- Secondary text: #888888
+- Accent/Rating: #ffb900
+- Primary button: #e50914
+
+### Recommended ML Weights
+
+- Genre similarity: 30%
+- Text similarity: 30%
+- Keyword similarity: 25%
+- Cast/crew similarity: 15%
+
+(Experiment with different weights!)
+
+---
+
+**End of Development Guide**
+
+This guide has covered every file you need to write, explained in detail without providing code snippets. You now have a complete roadmap for building CineMatch from start to finish. Take it file by file, test as you go, and you'll have a professional-quality portfolio project. Happy coding!
