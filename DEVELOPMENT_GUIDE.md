@@ -97,13 +97,21 @@ Write these package names, one per line:
 
 **Line 6:** Write "httpx" equals equals "0.26.0". This is your HTTP client - like the popular "requests" library but with async support. You need async for good performance when calling external APIs.
 
-**Line 7:** Write "scikit-learn" equals equals "1.4.0". This is the machine learning library. Provides TF-IDF vectorization and cosine similarity functions. It's massive (includes tons of ML algorithms) but you only need two functions.
+**Line 7:** Write "scikit-learn" equals equals "1.4.0". This is the machine learning library. Provides CountVectorizer for text vectorization and cosine similarity functions. It's massive (includes tons of ML algorithms) but you only need a few functions.
 
 **Line 8:** Write "numpy" equals equals "1.26.3". Required by scikit-learn. NumPy provides fast array operations. Most of Python's scientific computing ecosystem is built on NumPy.
 
 **Line 9:** Write "pytest" equals equals "7.4.4". This is Python's most popular testing framework. You'll write tests later to make sure your code works correctly.
 
 **Line 10:** Write "pytest-asyncio" equals equals "0.23.3". Adds support for testing async functions to pytest.
+
+**Line 11:** Write "rake-nltk" equals equals "1.0.6". RAKE (Rapid Automatic Keyword Extraction) automatically extracts important keywords and phrases from text. You'll use this to extract keywords from movie overviews, complementing TMDB's manual keywords. This makes recommendations smarter by finding semantic relationships.
+
+**Line 12:** Write "jax" equals equals "0.4.23". JAX provides `jax.numpy` - a drop-in replacement for NumPy with automatic differentiation, GPU acceleration, and JIT compilation. You'll use it for faster numerical computations in similarity calculations. It has the same API as NumPy, so it's easy to learn.
+
+**Line 13:** Write "jaxlib" equals equals "0.4.23". This is JAX's backend library that enables the actual computation. Required for JAX to work.
+
+**Note about JAX versions:** JAX and jaxlib versions must match exactly. If you see import errors, make sure both are the same version. For CPU-only (no GPU), jaxlib works fine. For GPU support, you'd need jaxlib with CUDA, but CPU is sufficient for this project.
 
 ### How to Use This File
 
@@ -1026,7 +1034,7 @@ This is where you demonstrate real ML skills. Take your time with this one.
 ### The ContentBasedRecommender Class
 
 **Why a class:**
-- Encapsulates the TF-IDF vectorizer (stateful)
+- Encapsulates the CountVectorizer (stateful)
 - Keeps all recommendation logic together
 - Easy to test and modify
 - Could be extracted into its own microservice later
@@ -1034,13 +1042,13 @@ This is where you demonstrate real ML skills. Take your time with this one.
 ### Class Structure Overview
 
 **Constructor:**
-Initialize the TF-IDF vectorizer with specific parameters.
+Initialize the CountVectorizer and RAKE keyword extractor.
 
 **Seven methods:**
-1. extract_features - Convert movie dict to feature dict
-2. genre_similarity - Compute Jaccard similarity for genres
-3. keyword_similarity - Compute Jaccard similarity for keywords
-4. text_similarity - Compute cosine similarity for overviews (batch)
+1. extract_features - Convert movie dict to feature dict with RAKE keyword extraction
+2. genre_similarity - Compute Jaccard similarity for genres using JAX
+3. keyword_similarity - Compute Jaccard similarity for keywords using JAX
+4. text_similarity - Compute cosine similarity for overviews using JAX
 5. cast_crew_similarity - Compute people overlap
 6. compute_similarity - Compute all similarities for all candidates
 7. recommend - Public interface returning top K recommendations
@@ -1052,41 +1060,65 @@ One shared instance.
 
 Before coding, understand what you're building:
 
-User views movie A → You fetch metadata for A → You fetch candidate movies B, C, D → For each candidate, you compute how similar it is to A using four different metrics → You blend those four scores into one final score → You sort by final score → You return the top 10.
+User views movie A → **TMDBService fetches metadata for A via API** → **TMDBService fetches candidate movies B, C, D via API** → For each candidate, you compute how similar it is to A using four different metrics → You blend those four scores into one final score (using JAX for numerical operations) → You sort by final score → You return the top 10.
+
+**Key difference from traditional ML:**
+- **No pre-trained model**: All computations happen in real-time
+- **No dataset**: Data comes fresh from TMDB API for each request
+- **Dynamic**: Recommendations adapt instantly when TMDB updates their data
+- **Explainable**: You know exactly why each movie was recommended
 
 ### Method 1: Constructor
 
 **What to initialize:**
-Create a TfidfVectorizer object from scikit-learn.
 
-**Parameters to set:**
-- max_features to 500 (limit vocabulary to 500 most common words, keeps vectors manageable)
+1. **CountVectorizer** from scikit-learn for text analysis
+2. **Rake** from rake_nltk for automatic keyword extraction
+
+**CountVectorizer parameters:**
+- max_features to 500 (limit vocabulary to 500 most common words)
 - stop_words to 'english' (removes common words like "the", "a", "is")
 - ngram_range to (1, 2) (use both single words and two-word phrases)
 
-**Why these parameters:**
+**Rake configuration:**
+- Import Rake from rake_nltk
+- Initialize with default settings (it will extract keywords from overview text)
+- This extracts important phrases automatically, complementing TMDB's manual keywords
 
-Max features 500: Movie overviews are short (1-2 paragraphs). 500 words is plenty to capture meaning without bloating memory.
+**Why these tools:**
 
-Stop words: "the" appears in every overview but tells you nothing about similarity. Removing them improves signal.
+**CountVectorizer**: Converts text to numerical vectors by counting word frequencies (bag-of-words approach). "Inception" overview will have counts for words like "dream", "subconscious", "heist". Simpler and faster than TF-IDF, and effective when combined with RAKE for keyword extraction.
 
-Ngram range (1, 2): Single words miss context. "time travel" as a phrase is more meaningful than "time" and "travel" separately. Including bigrams (2-word phrases) captures this.
+**RAKE** (Rapid Automatic Keyword Extraction): Finds multi-word phrases that appear frequently. Example: from "A thief who steals corporate secrets through dream-sharing technology", RAKE extracts "dream-sharing technology", "corporate secrets", "thief". These complement TMDB's manual keywords.
 
-**Store this vectorizer:**
-It will be reused for every recommendation request.
+**Max features 500**: Movie overviews are short (1-2 paragraphs). 500 words is plenty to capture meaning without bloating memory.
+
+**Stop words**: "the" appears in every overview but tells you nothing about similarity. Removing them improves signal.
+
+**Ngram range (1, 2)**: Single words miss context. "time travel" as a phrase is more meaningful than "time" and "travel" separately.
+
+**Why JAX for computations:**
+JAX provides `jax.numpy` which is a drop-in replacement for numpy with:
+- Automatic differentiation (useful if you later tune weights)
+- GPU acceleration (if available)
+- JIT compilation for faster execution
+- Identical API to numpy (easy to learn)
+
+**Store both tools:**
+They will be reused for every recommendation request.
 
 ### Method 2: extract_features
 
 **Purpose:**
-Convert a raw TMDB movie dictionary into a clean feature dictionary.
+Convert a raw TMDB movie dictionary (fetched via API) into a clean feature dictionary, enriching it with RAKE-extracted keywords.
 
 **Input:**
-A dictionary representing one movie, with keys like 'genres', 'keywords', 'credits', 'overview'.
+A dictionary representing one movie from TMDB API, with keys like 'genres', 'keywords', 'credits', 'overview'.
 
 **Output:**
 A dictionary with five keys:
 - genre_ids (set of integers)
-- keywords (set of lowercase strings)
+- keywords (set of lowercase strings) - **combines TMDB keywords + RAKE-extracted keywords**
 - overview (string)
 - cast_ids (set of integers for top 5 cast)
 - director (string name or None)
@@ -1096,8 +1128,28 @@ A dictionary with five keys:
 **Genre IDs:**
 Navigate to the 'genres' key (if missing, use empty list). It's a list of dicts, each with 'id' and 'name'. Extract all IDs into a set. Sets automatically deduplicate and allow fast intersection/union operations.
 
-**Keywords:**
-Navigate to 'keywords' key, then nested 'keywords' key inside that (TMDB's structure is keywords.keywords). Each keyword has a 'name' field. Extract all names, convert to lowercase (for case-insensitive matching), put in a set.
+**Keywords (Enhanced with RAKE):**
+
+**Step 1 - Get TMDB keywords:**
+Navigate to 'keywords' key, then nested 'keywords' key inside that (TMDB's structure is keywords.keywords). Each keyword has a 'name' field. Extract all names, convert to lowercase, put in a set.
+
+**Step 2 - Extract RAKE keywords from overview:**
+Get the 'overview' text. If it exists and is not empty:
+- Pass the overview to `self.rake.extract_keywords_from_text(overview)`
+- Get the extracted keywords with `self.rake.get_ranked_phrases()`
+- Convert all to lowercase
+- Add them to your keywords set
+
+**Step 3 - Combine:**
+Your final keywords set now contains both TMDB's manual keywords AND automatically extracted phrases from the overview. This gives richer semantic information.
+
+**Example:**
+- TMDB keywords: {"dystopia", "future", "rebellion"}
+- RAKE extracts from overview: {"totalitarian government", "freedom fighter", "underground resistance"}
+- Final keywords: All 6 phrases combined
+
+**Why this is powerful:**
+TMDB keywords are limited and manually tagged. RAKE extracts context-specific phrases that might not be in TMDB's keyword database. "artificial intelligence rebellion" is more specific than just "ai".
 
 **Overview:**
 Simply get the 'overview' key (if missing, use empty string).
@@ -1159,46 +1211,72 @@ Clarity. Reading code, you see "keyword_similarity" and immediately understand w
 ### Method 5: text_similarity
 
 **Purpose:**
-Compute TF-IDF based cosine similarity between target overview and all candidate overviews.
+Compute cosine similarity between target overview and all candidate overviews using CountVectorizer and JAX for numerical computations.
 
 **Parameters:**
 - target_overview (string)
 - candidate_overviews (list of strings)
 
 **Output:**
-NumPy array of similarity scores, one per candidate.
+JAX/NumPy array of similarity scores, one per candidate.
 
 **Algorithm:**
 
 **Step 1: Edge case handling**
-If target is empty or candidates list is empty, return array of zeros with length matching candidates.
+If target is empty or candidates list is empty, return `jax.numpy.zeros(len(candidates))` array.
 
 **Step 2: Combine texts**
 Create a list starting with target overview, followed by all candidate overviews. This will be one list with (1 + number of candidates) items.
 
-**Step 3: Fit TF-IDF**
+**Step 3: Fit and Transform with CountVectorizer**
 Call fit_transform on your vectorizer with that combined list. This returns a sparse matrix where:
 - Each row is a document (movie overview)
 - Each column is a word
-- Each value is that word's TF-IDF score in that document
+- Each value is that word's count/frequency in that document
 
-**Step 4: Extract vectors**
-The first row (index 0) is your target. The remaining rows (index 1 onwards) are your candidates. Slice them into two separate matrices. Keep the target as a 2D matrix (row vector) even though it's one row.
+**Step 4: Convert to dense arrays**
+Sparse matrices from sklearn need to be converted to dense arrays for JAX operations:
+- Call `.toarray()` on the count matrix to get a regular numpy array
+- Import `jax.numpy as jnp` at the top of your file
+- Convert to JAX arrays if needed: `jnp.array(dense_matrix)`
 
-**Step 5: Compute cosine similarity**
-Call cosine_similarity function from scikit-learn passing target vector and candidate vectors. This returns a matrix, but since target is one row, you get one row of results. Extract that row (index 0) to get a 1D array.
+**Step 5: Extract vectors**
+The first row (index 0) is your target. The remaining rows (index 1 onwards) are your candidates. Slice them into two separate matrices.
 
-**Step 6: Return**
-Return that array of scores.
+**Step 6: Compute cosine similarity with JAX**
+You can either:
+- **Option A**: Use sklearn's cosine_similarity (easiest for now)
+- **Option B**: Implement with JAX manually:
+  ```python
+  # Normalize vectors
+  target_norm = target / jnp.linalg.norm(target, axis=1, keepdims=True)
+  candidates_norm = candidates / jnp.linalg.norm(candidates, axis=1, keepdims=True)
+  # Dot product = cosine similarity for normalized vectors
+  similarities = jnp.dot(target_norm, candidates_norm.T).flatten()
+  ```
+
+**Recommendation**: Start with sklearn's cosine_similarity, then refactor to pure JAX once you understand the algorithm.
+
+**Step 7: Return**
+Return the array of scores.
 
 **Why batch process:**
-Computing TF-IDF once for all documents together is much faster than computing it separately for each candidate. The vectorizer learns vocabulary across all documents, giving better features.
+Computing word counts once for all documents together is much faster than computing it separately for each candidate. The vectorizer learns vocabulary across all documents, giving better features.
 
 **Cosine similarity explained:**
-Imagine each overview as an arrow in 5000-dimensional space (one dimension per word). Cosine similarity measures the angle between arrows. Parallel arrows (same direction) score 1.0. Perpendicular arrows score 0.0. It ignores length - a longer overview with the same words scores the same.
+Imagine each overview as an arrow in 500-dimensional space (one dimension per word from max_features). Cosine similarity measures the angle between arrows. Parallel arrows (same direction) score 1.0. Perpendicular arrows score 0.0. It ignores length - a longer overview with the same words scores the same.
 
 **Why this works:**
-Overviews with similar plot descriptions will use similar vocabulary, giving similar TF-IDF vectors, resulting in high cosine similarity.
+Overviews with similar plot descriptions will use similar vocabulary, giving similar count vectors, resulting in high cosine similarity.
+
+**CountVectorizer vs TF-IDF:**
+CountVectorizer (bag of words) is simpler and often performs similarly to TF-IDF for short texts like movie overviews, especially when combined with RAKE keyword extraction which already filters meaningful terms.
+
+**JAX advantages here:**
+- Faster computation for large batches
+- Can JIT-compile the cosine similarity calculation
+- GPU acceleration if available
+- Learn JAX's array operations (similar to NumPy)
 
 ### Method 6: cast_crew_similarity
 
@@ -1319,6 +1397,73 @@ Separates the interface from the implementation. If you change how compute_simil
 After class definition, create one instance:
 
 recommender equals ContentBasedRecommender()
+
+### Understanding the Data Flow: API-Driven Recommendations
+
+**Important: This is NOT a traditional ML model**
+
+Traditional approach:
+1. Download large movie dataset (CSV with 50,000 movies)
+2. Pre-process and clean offline
+3. Train a model or pre-compute all similarity matrices
+4. Load the trained model/matrices at runtime
+5. Serve recommendations from cached results
+
+**Your approach (Real-time API-driven):**
+
+1. **User requests recommendations** for movie X
+2. **API endpoint calls TMDBService** to fetch movie X details via TMDB API
+3. **API endpoint calls TMDBService** to fetch candidates:
+   - Similar movies via `/movie/{id}/similar` endpoint
+   - Same-genre movies via `/discover/movie` endpoint
+4. **All raw movie data arrives as JSON** from TMDB in real-time
+5. **ContentBasedRecommender processes this data**:
+   - Extracts features from target movie
+   - Extracts features from all candidates
+   - Computes similarities using JAX
+   - Ranks and returns top 10
+6. **Response sent to frontend** - entire process takes 1-3 seconds
+
+**Advantages of API-driven approach:**
+- ✅ **Always fresh**: TMDB updates data daily, your recommendations reflect that
+- ✅ **No storage**: Don't need to maintain a 5GB movie database
+- ✅ **Scalable**: TMDB handles the data infrastructure
+- ✅ **Explainable**: You compute similarities on-demand with full transparency
+- ✅ **Flexible**: Can adjust weights and algorithms without retraining
+
+**Disadvantages to be aware of:**
+- ⚠️ **API rate limits**: TMDB allows 40 requests per 10 seconds
+- ⚠️ **Latency**: Network calls add 500ms-1s vs instant database lookup
+- ⚠️ **Dependency**: If TMDB is down, your recommendations fail
+
+**How to handle rate limits:**
+For now, you're fine - each recommendation request makes ~3-5 API calls. Later you can add caching (Redis) for popular movies.
+
+**Real-world example flow:**
+
+```
+User requests: "Recommend movies like Inception (ID: 27205)"
+
+→ TMDBService.get_movie_details(27205)
+  Returns: {title: "Inception", genres: [{id: 28, name: "Action"}...], 
+           overview: "A thief who...", keywords: {keywords: [{name: "dream"}...]}}
+
+→ TMDBService.get_similar_movies(27205)
+  Returns: {results: [20 movie objects]}
+
+→ TMDBService.discover_by_genres([28, 878, 53])
+  Returns: {results: [20 movie objects]}
+
+→ ContentBasedRecommender.recommend(target, candidates, top_k=10)
+  - Extracts features from all movies (RAKE enriches keywords here)
+  - Computes 4 similarity metrics using JAX
+  - Blends scores: 30% genre + 30% text + 25% keywords + 15% cast/crew
+  - Sorts and returns top 10
+
+→ API returns: [{movie: {...}, score: 0.87, reason: "Shared genres: Action, Sci-Fi"}, ...]
+```
+
+**Key insight**: Your recommender is a **real-time computation engine**, not a pre-trained model. It's more like a calculator than a neural network.
 
 ### Testing Your Recommender
 

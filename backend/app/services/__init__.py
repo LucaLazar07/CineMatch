@@ -14,7 +14,7 @@ class TMDBService:
             headers=headers,
             timeout=10.0
         )
-        
+
     async def search_movies(self, query: str, page: int = 1):
         url ="/search/movie"
         params = {
@@ -25,7 +25,7 @@ class TMDBService:
         response = await self.client.get(url=url, params=params)
         response.raise_for_status()
         return response.json()
-    
+
     async def get_movie_details(self, movie_id: int):
         url = f"/movie/{movie_id}"
         params = {
@@ -45,7 +45,7 @@ class TMDBService:
         response = await self.client.get(url=url, params=params)
         response.raise_for_status()
         return response.json()
-    
+
     async def discover_by_genres(self, genre_ids: List[int], page: int = 1):
         url = "/discover/movie"
         genre = ",".join(str(g) for g in genre_ids)
@@ -58,9 +58,8 @@ class TMDBService:
         response = await self.client.get(url=url, params=params)
         response.raise_for_status()
         return response.json()
-    
+
     async def close(self):
         await self.client.aclose()
-    
 
 service = TMDBService()
