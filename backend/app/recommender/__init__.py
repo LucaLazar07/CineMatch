@@ -42,7 +42,7 @@ class ContentBasedRecommender:
             "director": director
         }
 
-    def genre_similarity( self,target_genres: set, candidate_genres: set) -> float:
+    def genre_similarity(self,target_genres: set, candidate_genres: set) -> float:
         if not target_genres or not candidate_genres:
             return 0.0
 
