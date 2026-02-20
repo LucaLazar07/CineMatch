@@ -1,43 +1,50 @@
-from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
-import jax 
-import jax.numpy as jnp
 import rake_nltk
 from rake_nltk import Rake
-import nltk
-nltk.download('stopwords')
-nltk.download('punkt')
-nltk.download('punkt_tab')
 from typing import List
+from sentence_transformers import SentenceTransformer
 
 class ContentBasedRecommender:
     def __init__(self):
-        self.count = CountVectorizer(
-            max_features=500,
-            ngram_range=(1, 2),
-            min_df=1,
-            lowercase=True
-        )
+        self._embedding_model = None
         self.rake = Rake()
+    
+    @property
+    def embedding_model(self):
+        if self._embedding_model is None:
+            self._embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+        return self._embedding_model
 
     def extract_features(self, movie: dict) -> dict:
-        genre_ids = {genre["id"] for genre in movie.get("genres", [])}
+        if "genre_ids" in movie:
+            genre_ids = set(movie.get("genre_ids", []))
+        else:
+            genre_ids = {genre["id"] for genre in movie.get("genres", [])}
+        
         keywords = {keyword["name"].lower() for keyword in movie.get("keywords", [])}
         overview = movie.get("overview", "")
         if overview:
+            overview_embedding = self.embedding_model.encode(
+                overview,
+                convert_to_numpy=True,
+                normalize_embeddings=True
+            )
+
             self.rake.extract_keywords_from_text(overview)
             phrases = self.rake.get_ranked_phrases()
             keywords.update(phrase.lower() for phrase in phrases)
+
         cast_list = movie.get("credits", {}).get("cast", [])
         cast_ids = {cast["id"] for index, cast in enumerate(cast_list) if index < 5}
+
         crew_list = movie.get("credits", {}).get("crew", [])
         director = next((crew["name"] for crew in crew_list if crew.get("job") == "Director"), None)
 
         return {
             "genre_ids": genre_ids,
             "keywords": keywords,
-            "overview": overview,
+            "overview_embedding": overview_embedding,
             "cast_ids": cast_ids,
             "director": director
         }
@@ -64,17 +71,13 @@ class ContentBasedRecommender:
 
         return jaccard_similarity
 
-    def overview_similarity(self, target_overview: str, candidate_overviews: List[str]):
-        if not target_overview or not candidate_overviews:
-            return np.zeros(len(candidate_overviews))
-        overviews = []
-        overviews.append(target_overview)
-        overviews.extend(candidate_overviews)
+    def overview_similarity(self, target_embedding: np.ndarray, candidate_embedding: np.ndarray):
+        if target_embedding is None or candidate_embedding is None:
+            return 0.0
 
-        count_matrix = self.count.fit_transform(overviews)
-        cos_sim = cosine_similarity(count_matrix[0:1], count_matrix[1:])
+        similarity = np.dot(target_embedding, candidate_embedding)
 
-        return cos_sim[0]
+        return max(0.0, min(1.0, similarity))
 
     def cast_crew_similarity(self, target_cast: set, target_director: str,
                              candidate_cast: set, candidate_director: str) -> float:
@@ -99,10 +102,6 @@ class ContentBasedRecommender:
 
         for candidate in candidates:
             candidate_features.append(self.extract_features(candidate))
-            overviews.append(candidate.get("overview", ""))
-
-        target_overview = target_features["overview"]
-        overview_similarities = self.overview_similarity(target_overview=target_overview, candidate_overviews=overviews)
 
         results = []
         for index, candidate_feature in enumerate(candidate_features):
@@ -116,7 +115,10 @@ class ContentBasedRecommender:
                 candidate_keywords=candidate_feature["keywords"]
             )
             
-            overview_similarity = overview_similarities[index]
+            overview_similarity = self.overview_similarity(
+                target_embedding=target_features["overview_embedding"],
+                candidate_embedding=candidate_feature["overview_embedding"]
+            )
 
             cast_crew_similarity = self.cast_crew_similarity(
                 target_cast=target_features["cast_ids"],
@@ -126,10 +128,10 @@ class ContentBasedRecommender:
             )
             
             similarity = (
-                genre_similarity * 0.30 + 
+                genre_similarity * 0.35 + 
                 keyword_similarity * 0.20 +
                 overview_similarity * 0.25 +
-                cast_crew_similarity * 0.25
+                cast_crew_similarity * 0.20
             )
             
             results.append((candidates[index], similarity))

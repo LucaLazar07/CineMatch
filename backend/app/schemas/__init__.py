@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional
 from datetime import date
 
@@ -10,6 +10,13 @@ class MovieSummary(BaseModel):
     vote_average: float = Field(0.0, ge=0.0, le=10.0, description="Rating of the movie")
     vote_count: int = Field(0, description="Number of people who rated the movie")
     overview: Optional[str] = Field(None, description="Short plot summary")
+
+    @field_validator('release_date', mode='before')
+    @classmethod
+    def empty_str_to_none(cls, str):
+        if str == "":
+            return None
+        return str
     
 class Genre(BaseModel):
     id: int = Field(..., gt=0, description="Genre ID")

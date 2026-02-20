@@ -12,7 +12,8 @@ class TMDBService:
         self.client = httpx.AsyncClient(
             base_url=self.base_url,
             headers=headers,
-            timeout=10.0
+            timeout=10.0,
+            http2=True
         )
 
     async def search_movies(self, query: str, page: int = 1):
@@ -46,12 +47,13 @@ class TMDBService:
         response.raise_for_status()
         return response.json()
 
-    async def discover_by_genres(self, genre_ids: List[int], page: int = 1):
+    async def discover_by_genres(self, genre_ids: List[int], page: int = 1, sort_by: str = "vote_average.desc", min_vote_count: int = 1000):
         url = "/discover/movie"
         genre = ",".join(str(g) for g in genre_ids)
         params = {
             "with_genres": genre,
-            "sort_by": "popularity.desc",
+            "sort_by": sort_by,
+            "vote_count.gte": min_vote_count,
             "page": page,
             "language": "en-US",
         }
