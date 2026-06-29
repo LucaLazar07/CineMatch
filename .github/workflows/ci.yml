@@ -22,10 +22,22 @@ jobs:
       - name: Apply alembic migrations (SQLite CI DB)
         env:
           DATABASE_URL: sqlite:///./ci_test.db
+          TMDB_API_KEY: ci_dummy
+          JWT_SECRET_KEY: ci_dummy_secret
+          JWT_ALGORITHM: HS256
+          ACCESS_TOKEN_EXP_MINUTES: 30
+          REFRESH_TOKEN_EXP_DAYS: 7
         run: |
           cd backend
           alembic -c alembic.ini upgrade head
       - name: Run backend tests
+        env:
+          DATABASE_URL: sqlite:///./ci_test.db
+          TMDB_API_KEY: ci_dummy
+          JWT_SECRET_KEY: ci_dummy_secret
+          JWT_ALGORITHM: HS256
+          ACCESS_TOKEN_EXP_MINUTES: 30
+          REFRESH_TOKEN_EXP_DAYS: 7
         run: |
           cd backend
           pytest -q
