@@ -1,26 +1,35 @@
 {
-    "expo": {
-        "name": "CineMatch",
-        "slug": "cinematch",
-        "version": "1.0.0",
-        "orientation": "portrait",
-        "icon": "./assets/icon.png",
-        "splash": {
-            "image": "./assets/splash.png",
-            "resizeMode": "contain",
-            "backgroundColor": "#FFFFFF"
-        },
-        "platforms": ["android"],
-        "android": {
-            "adaptiveIcon": {
-                "foregroundImage": "./assets/icon.png",
-                "backgroundColor": "#FFFFFF"
-            },
-            "package": "com.lucalazar.cinematch",
-            "versionCode": 1
-        },
-        "extra": {
-            "apiUrl": "http://192.168.100.24:8000/api"
-        }
-    }
+  "expo": {
+    "name": "Kino",
+    "slug": "Kino",
+    "projectId": "5216781b-3a5c-449f-a72f-fe2f65b213fa",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#FFFFFF"
+    },
+    "platforms": [
+      "android",
+      "web"
+    ],
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#FFFFFF"
+      },
+      "package": "com.lucalazar.cinematch",
+      "versionCode": 1
+    },
+    "extra": {
+      "eas": {
+        "projectId": "5216781b-3a5c-449f-a72f-fe2f65b213fa"
+      }
+    },
+    "plugins": [
+      "expo-secure-store"
+    ]
+  }
 }

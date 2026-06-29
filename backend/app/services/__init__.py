@@ -47,16 +47,18 @@ class TMDBService:
         response.raise_for_status()
         return response.json()
 
-    async def discover_by_genres(self, genre_ids: List[int], page: int = 1, sort_by: str = "vote_average.desc", min_vote_count: int = 1000):
+    async def discover_by_genres(self, genre_ids: List[int] | None = None, page: int = 1, sort_by: str = "vote_average.desc", min_vote_count: int = 1000, **extra_params):
         url = "/discover/movie"
-        genre = ",".join(str(g) for g in genre_ids)
         params = {
-            "with_genres": genre,
             "sort_by": sort_by,
             "vote_count.gte": min_vote_count,
             "page": page,
             "language": "en-US",
         }
+        if genre_ids:
+            params["with_genres"] = ",".join(str(g) for g in genre_ids)
+        # Allow passing through extra TMDB discover params (e.g. with_runtime.lte)
+        params.update(extra_params)
         response = await self.client.get(url=url, params=params)
         response.raise_for_status()
         return response.json()

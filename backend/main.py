@@ -1,24 +1,30 @@
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
+import logging
 from app.core.config import settings
+from app.core.rate_limit import AuthRateLimitMiddleware
 from app.api import router
 from app.services import service
 import uvicorn
 
+logger = logging.getLogger(__name__)
+
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("Starting CineMatch API...")
+async def lifespan(_app: FastAPI):
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    logger.info("Starting CineMatch API")
+    logger.info("Database migrations must be applied before startup")
 
     import nltk
     nltk.download('stopwords', quiet=True)
     nltk.download('punkt', quiet=True)
     nltk.download('punkt_tab', quiet=True)
-    print("NLTK imports done")
+    logger.info("NLTK resources ready")
 
     yield
 
-    print("Shutting down CineMatch API...")
+    logger.info("Shutting down CineMatch API")
     await service.close()
 
 app = FastAPI(
@@ -28,10 +34,13 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+app.add_middleware(AuthRateLimitMiddleware)
+
+_wildcard_cors = settings.cors_origins == ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
-    allow_credentials=True,
+    allow_credentials=not _wildcard_cors,
     allow_methods=["*"],
     allow_headers=["*"]
 )
@@ -51,9 +60,10 @@ async def root():
     }
 
 if __name__ == "__main__":
+    import os
     uvicorn.run(
         app="main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True
+        host=settings.backend_host,
+        port=settings.backend_port,
+        reload=os.getenv("DEV_RELOAD", "false").lower() == "true",
     )

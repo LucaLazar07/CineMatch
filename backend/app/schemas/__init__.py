@@ -6,10 +6,15 @@ class MovieSummary(BaseModel):
     id: int = Field(..., gt=0, description="TMDB Movie ID")
     title: str = Field(..., min_length=1, description="Movie Title")
     poster_path: Optional[str] = Field(None, description="Path to movie poster")
+    backdrop_path: Optional[str] = Field(None, description="Backdrop image path")
     release_date: Optional[date] = Field(None, description="Release date of the movie")
     vote_average: float = Field(0.0, ge=0.0, le=10.0, description="Rating of the movie")
     vote_count: int = Field(0, description="Number of people who rated the movie")
     overview: Optional[str] = Field(None, description="Short plot summary")
+    genre_ids: List[int] = Field(
+        default_factory=list,
+        description="TMDB genre ids (search results include this for filtering)",
+    )
 
     @field_validator('release_date', mode='before')
     @classmethod

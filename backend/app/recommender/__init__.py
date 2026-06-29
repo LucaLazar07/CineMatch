@@ -9,6 +9,8 @@ class ContentBasedRecommender:
     def __init__(self):
         self._embedding_model = None
         self.rake = Rake()
+        # simple in-memory cache: movie_id -> features dict
+        self._feature_cache = {}
     
     @property
     def embedding_model(self):
@@ -17,6 +19,9 @@ class ContentBasedRecommender:
         return self._embedding_model
 
     def extract_features(self, movie: dict) -> dict:
+        movie_id = movie.get("id")
+        if movie_id and movie_id in self._feature_cache:
+            return self._feature_cache[movie_id]
         if "genre_ids" in movie:
             genre_ids = set(movie.get("genre_ids", []))
         else:
@@ -24,6 +29,7 @@ class ContentBasedRecommender:
         
         keywords = {keyword["name"].lower() for keyword in movie.get("keywords", [])}
         overview = movie.get("overview", "")
+        overview_embedding = None
         if overview:
             overview_embedding = self.embedding_model.encode(
                 overview,
@@ -40,14 +46,19 @@ class ContentBasedRecommender:
 
         crew_list = movie.get("credits", {}).get("crew", [])
         director = next((crew["name"] for crew in crew_list if crew.get("job") == "Director"), None)
-
-        return {
+        features = {
             "genre_ids": genre_ids,
             "keywords": keywords,
             "overview_embedding": overview_embedding,
             "cast_ids": cast_ids,
-            "director": director
+            "director": director,
         }
+
+        if movie_id:
+            self._feature_cache[movie_id] = features
+
+        return features
+        
 
     def genre_similarity(self,target_genres: set, candidate_genres: set) -> float:
         if not target_genres or not candidate_genres:
@@ -144,5 +155,44 @@ class ContentBasedRecommender:
                                                   candidates=candidates)
         
         return recommendations[0:top_k]
+
+    def recommend_by_mood(self, mood_text: str, candidates: List[dict], top_k: int = 10):
+        # Create a pseudo-target from the mood text: embedding + keywords
+        mood_text = mood_text or ""
+        mood_embedding = None
+        mood_keywords = set()
+
+        if mood_text:
+            mood_embedding = self.embedding_model.encode(
+                mood_text,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            )
+            # extract key phrases from mood text to match against movie keywords
+            self.rake.extract_keywords_from_text(mood_text)
+            phrases = self.rake.get_ranked_phrases()
+            mood_keywords.update(phrase.lower() for phrase in phrases)
+
+        results = []
+        for candidate in candidates:
+            candidate_features = self.extract_features(candidate)
+
+            overview_similarity = self.overview_similarity(
+                target_embedding=mood_embedding,
+                candidate_embedding=candidate_features.get("overview_embedding")
+            )
+
+            # keyword similarity between mood phrases and movie keywords
+            keyword_similarity = self.keyword_similarity(
+                target_keywords=mood_keywords,
+                candidate_keywords=candidate_features.get("keywords", set())
+            )
+
+            # Combine signals with higher weight on the semantic overview similarity
+            similarity = overview_similarity * 0.7 + keyword_similarity * 0.3
+
+            results.append((candidate, similarity))
+
+        return sorted(results, key=lambda x: x[1], reverse=True)[:top_k]
 
 recommender = ContentBasedRecommender()

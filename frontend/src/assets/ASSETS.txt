@@ -1,0 +1,3 @@
+Optional assets you may add later:
+- paper-grain.png — seamless subtle noise tile for ImageBackground under grainOverlay (replace uniform rgba overlay in layoutStyles).
+- Custom SVG tab icons — if you want pixel-perfect matches to Figma instead of Feather / MaterialCommunityIcons outlines.
